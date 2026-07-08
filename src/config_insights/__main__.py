@@ -62,7 +62,10 @@ def main() -> int:
     table_name = f"{catalog}.{schema}.settings_history"
     view_latest = f"{catalog}.{schema}.settings_latest"
     view_comparison = f"{catalog}.{schema}.workspace_comparison"
-    monitoring_schema = f"{catalog}.monitoring"
+    # Lakehouse Monitoring metric tables live in the same catalog.schema as the
+    # settings table (harmonized single location). Their names are suffixed by
+    # the platform (settings_history_profile_metrics / _drift_metrics).
+    monitoring_schema = f"{catalog}.{schema}"
 
     # Parse workspace filter
     workspace_filter = None
@@ -77,14 +80,21 @@ def main() -> int:
 
     records = None
 
+    # Normalize the account id: an empty string or the "none" sentinel (the
+    # DAB default) means workspace-only mode. A non-empty string in the job's
+    # parameter list is required because Terraform rejects null list items.
+    account_id_arg = args.account_id
+    if account_id_arg and account_id_arg.strip().lower() in ("", "none"):
+        account_id_arg = None
+
     # Set account ID from CLI arg so AccountClient picks it up
-    if args.account_id:
-        os.environ["DATABRICKS_ACCOUNT_ID"] = args.account_id
+    if account_id_arg:
+        os.environ["DATABRICKS_ACCOUNT_ID"] = account_id_arg
 
     # Try account-level collection first (requires account admin credentials)
-    if args.account_id:
+    if account_id_arg:
         try:
-            account_client = AccountClient(account_id=args.account_id)
+            account_client = AccountClient(account_id=account_id_arg)
             logger.info("Connected to account: %s", account_client.config.account_id)
             collector = ConfigInsightsCollector(
                 account_client=account_client,
@@ -140,7 +150,7 @@ def main() -> int:
             workspace_name=workspace_name,
         )
         collected_at = datetime.now(tz.utc)
-        account_id = args.account_id or "unknown"
+        account_id = account_id_arg or "unknown"
 
         logger.info("Workspace-only mode: scanning %s (ID: %s)", workspace_name, workspace_id)
         records = discover_workspace_settings(
@@ -199,10 +209,10 @@ def main() -> int:
 
     ws_client = WorkspaceClient()
 
-    # Create/update the monitor if requested (first run or config change)
+    # Create/update the monitor if requested (first run or config change).
+    # The monitoring output schema is the same as the settings schema (created
+    # above), so no extra CREATE SCHEMA is needed.
     if args.setup_monitor:
-        spark.sql(f"CREATE SCHEMA IF NOT EXISTS {monitoring_schema}")
-
         monitor_info = setup_lakehouse_monitor(
             ws_client=ws_client,
             table_name=table_name,

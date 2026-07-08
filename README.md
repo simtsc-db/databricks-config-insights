@@ -5,7 +5,7 @@ Discover, track, and monitor **every** account and workspace setting — includi
 lists and platform-native drift detection.
 
 The tool packages everything as a **Databricks Asset Bundle (DAB)**: a scheduled
-collection **job**, an AI/BI **dashboard**, three SQL **alerts**, and a Lakehouse
+collection **job**, an AI/BI **dashboard**, two SQL **alerts**, and a Lakehouse
 **monitor**. Deploy it straight from a Databricks Git folder, or with the
 Databricks CLI from your laptop.
 
@@ -19,7 +19,7 @@ Databricks CLI from your laptop.
 | **Preview feature tracking** | Settings carry a `preview_phase` (`PRIVATE_PREVIEW`, `BETA`, `PUBLIC_PREVIEW`, …). Previews are surfaced automatically with a dedicated enabled/disabled heatmap. |
 | **Schema evolution** | The Delta table is written with `mergeSchema=true`, so new metadata fields added by Databricks appear as new columns with no DDL changes. |
 | **Platform-native drift** | A Lakehouse Monitoring **TimeSeries** profile computes drift metrics daily — no handcrafted comparison SQL. |
-| **Alerting** | Three SQL alerts fire on config drift, cross-workspace security inconsistencies, and newly enabled preview features. |
+| **Alerting** | Two SQL alerts fire on config drift and newly enabled preview features. |
 | **Zero maintenance** | New settings/previews added by Databricks are captured on the next run; deprecated ones simply stop appearing. |
 
 ---
@@ -41,14 +41,9 @@ Which previews are **enabled** vs **disabled**, by workspace and preview phase.
 ![Preview Features Heatmap](docs/images/02-preview-heatmap.png)
 
 ### Configuration Drift
-Changes per day (from Lakehouse Monitoring) cross-filtering a change-detail table.
+Changes per day cross-filtering a change-detail table, plus cross-workspace consistency.
 
 ![Configuration Drift](docs/images/03-configuration-drift.png)
-
-### Security Posture
-Security-relevant settings and cross-workspace inconsistencies.
-
-![Security Posture](docs/images/04-security-posture.png)
 
 ---
 
@@ -76,9 +71,9 @@ Security-relevant settings and cross-workspace inconsistencies.
 └───────────────────────────────────┬───────────────────────────────────────┘
                                      ▼
 ┌───────────────────────────────────────────────────────────────────────────┐
-│  AI/BI Dashboard (4 pages)      +      3 SQL Alerts                         │
-│    Overview · Preview Heatmap          drift · security · new-preview       │
-│    Config Drift · Security                                                  │
+│  AI/BI Dashboard (3 pages)      +      2 SQL Alerts                         │
+│    Overview · Preview Heatmap          drift · new-preview                  │
+│    Config Drift                                                             │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -98,7 +93,7 @@ databricks-config-insights/
 │   │   ├── config_insights.dashboard.yml   # AI/BI dashboard resource
 │   │   └── config_insights.lvdash.json     # Dashboard definition (4 pages)
 │   └── alerts/
-│       └── config_alerts.yml           # 3 SQL alerts (drift, security, new preview)
+│       └── config_alerts.yml           # 2 SQL alerts (drift, new preview)
 ├── sql/
 │   └── create_tables.sql               # Reference DDL (tables are created by the job)
 ├── src/
@@ -175,7 +170,7 @@ databricks bundle run config_collector -t dev -p <profile> \
 - Open the **Configuration Insights** dashboard in your workspace.
 - The Lakehouse **monitor** is created on `settings_history`; its drift metrics
   populate a few minutes after the first two collection runs exist.
-- The three SQL **alerts** evaluate daily and email the deploying user.
+- The two SQL **alerts** evaluate daily and email the deploying user.
 
 ---
 
@@ -190,6 +185,14 @@ defaults in `databricks.yml`.
 | `schema` | `config_insights` | Schema within the catalog. |
 | `warehouse_id` | *(required)* | SQL warehouse for the dashboard and alerts. |
 | `account_id` | `""` (empty) | Optional account ID for cross-workspace scanning (requires account admin). Empty ⇒ workspace-only mode. |
+
+**Single, harmonized storage location.** Everything the tool creates — the
+`settings_history` table, the `settings_latest` / `workspace_comparison` /
+`preview_heatmap` views, the dashboard datasets, the SQL alerts, **and** the
+Lakehouse Monitoring metric tables (`settings_history_profile_metrics`,
+`settings_history_drift_metrics`) — lives in the same **`${catalog}.${schema}`**.
+Change those two variables and the whole tool (job, dashboard, alerts, monitor)
+follows. Nothing is pinned to a hardcoded catalog or schema.
 
 ### Scheduling
 
@@ -249,7 +252,7 @@ that feed both the dashboard's Configuration Drift page and the drift SQL alert.
 Set `account_id` **and** run the job with an identity that is an **account admin**
 (typically a service principal). The collector then enumerates all workspaces via
 `AccountClient.workspaces.list()` and scans each one, enabling the cross-workspace
-comparison and security-inconsistency views.
+comparison view (Configuration Drift page).
 
 If the job identity is only a workspace admin (the default), the account API
 returns `Not Found` and the tool automatically falls back to **workspace-only**

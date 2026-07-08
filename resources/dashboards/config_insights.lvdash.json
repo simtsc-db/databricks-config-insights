@@ -49,11 +49,6 @@
       "name": "inconsistencies_ds",
       "displayName": "Inconsistent Settings",
       "query": "SELECT setting_name, category, distinct_values, workspace_count, sample_value, consistency_status FROM workspace_comparison ORDER BY consistency_status, distinct_values DESC"
-    },
-    {
-      "name": "security_settings_ds",
-      "displayName": "Security Settings",
-      "query": "SELECT workspace_name, setting_name, setting_value, category, description FROM settings_latest WHERE category = 'security' OR LOWER(setting_name) LIKE '%security%' OR LOWER(setting_name) LIKE '%csp%' OR LOWER(setting_name) LIKE '%encrypt%' OR LOWER(setting_name) LIKE '%token%' OR LOWER(setting_name) LIKE '%ip_access%' OR LOWER(setting_name) LIKE '%disable_legacy%' ORDER BY setting_name, workspace_name"
     }
   ],
   "pages": [
@@ -447,55 +442,6 @@
             }
           },
           "position": {"x": 0, "y": 14, "width": 12, "height": 6}
-        }
-      ]
-    },
-    {
-      "name": "security",
-      "displayName": "Security Posture",
-      "pageType": "PAGE_TYPE_CANVAS",
-      "layoutVersion": "GRID_V1",
-      "layout": [
-        {
-          "widget": {
-            "name": "security-title",
-            "multilineTextboxSpec": {"lines": ["## Security Posture"]}
-          },
-          "position": {"x": 0, "y": 0, "width": 12, "height": 1}
-        },
-        {
-          "widget": {
-            "name": "security-table",
-            "queries": [{
-              "name": "main_query",
-              "query": {
-                "datasetName": "security_settings_ds",
-                "fields": [
-                  {"name": "workspace_name", "expression": "`workspace_name`"},
-                  {"name": "setting_name", "expression": "`setting_name`"},
-                  {"name": "setting_value", "expression": "`setting_value`"},
-                  {"name": "category", "expression": "`category`"},
-                  {"name": "description", "expression": "`description`"}
-                ],
-                "disaggregated": true
-              }
-            }],
-            "spec": {
-              "version": 2,
-              "widgetType": "table",
-              "encodings": {
-                "columns": [
-                  {"fieldName": "workspace_name", "displayName": "Workspace"},
-                  {"fieldName": "setting_name", "displayName": "Setting"},
-                  {"fieldName": "setting_value", "displayName": "Value"},
-                  {"fieldName": "category", "displayName": "Category"},
-                  {"fieldName": "description", "displayName": "Description"}
-                ]
-              },
-              "frame": {"showTitle": true, "title": "Security-Related Settings"}
-            }
-          },
-          "position": {"x": 0, "y": 1, "width": 12, "height": 8}
         }
       ]
     }

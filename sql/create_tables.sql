@@ -1,16 +1,19 @@
--- Configuration Insights - Schema Setup
+-- Configuration Insights - Schema Setup (REFERENCE ONLY)
+-- Tables and views are created automatically by the collector job; this file
+-- documents the schema. All objects live in ONE configurable location:
+--   <catalog>.<schema>   (DAB variables `catalog` + `schema`; defaults main.config_insights)
+-- Replace `main.config_insights` below with your own catalog.schema if different.
 -- Tables use schema evolution: new fields from the API are added automatically.
 -- Drift detection is handled by Lakehouse Monitoring (no custom drift table needed).
 
-CREATE CATALOG IF NOT EXISTS config_insights;
-CREATE SCHEMA IF NOT EXISTS config_insights.default;
-CREATE SCHEMA IF NOT EXISTS config_insights.monitoring;
+-- The catalog must already exist; the job creates the schema.
+CREATE SCHEMA IF NOT EXISTS main.config_insights;
 
 -- Primary settings history table (append-only, TimeSeries layout)
 -- Each collection run appends a full snapshot of all discovered settings.
 -- Schema evolution (mergeSchema=true) adds new columns automatically if
 -- the Settings V2 API returns new metadata fields in future.
-CREATE TABLE IF NOT EXISTS config_insights.default.settings_history (
+CREATE TABLE IF NOT EXISTS main.config_insights.settings_history (
     collected_at TIMESTAMP NOT NULL
         COMMENT 'Timestamp of this collection run (TimeSeries key for Lakehouse Monitoring)',
     account_id STRING NOT NULL
@@ -46,24 +49,24 @@ TBLPROPERTIES (
 );
 
 -- View: Latest snapshot (most recent collection run only)
-CREATE OR REPLACE VIEW config_insights.default.settings_latest AS
+CREATE OR REPLACE VIEW main.config_insights.settings_latest AS
 WITH latest AS (
     SELECT MAX(collected_at) AS max_ts
-    FROM config_insights.default.settings_history
+    FROM main.config_insights.settings_history
 )
 SELECT s.*
-FROM config_insights.default.settings_history s
+FROM main.config_insights.settings_history s
 INNER JOIN latest l ON s.collected_at = l.max_ts;
 
 -- View: Workspace comparison (identifies inconsistencies)
-CREATE OR REPLACE VIEW config_insights.default.workspace_comparison AS
+CREATE OR REPLACE VIEW main.config_insights.workspace_comparison AS
 WITH latest AS (
     SELECT MAX(collected_at) AS max_ts
-    FROM config_insights.default.settings_history
+    FROM main.config_insights.settings_history
 ),
 current_settings AS (
     SELECT s.*
-    FROM config_insights.default.settings_history s
+    FROM main.config_insights.settings_history s
     INNER JOIN latest l ON s.collected_at = l.max_ts
     WHERE s.scope = 'workspace'
 ),
@@ -90,10 +93,10 @@ SELECT
 FROM agg a;
 
 -- View: Preview features status across workspaces
-CREATE OR REPLACE VIEW config_insights.default.preview_features AS
+CREATE OR REPLACE VIEW main.config_insights.preview_features AS
 WITH latest AS (
     SELECT MAX(collected_at) AS max_ts
-    FROM config_insights.default.settings_history
+    FROM main.config_insights.settings_history
 )
 SELECT
     s.workspace_name,
@@ -107,7 +110,7 @@ SELECT
         WHEN LOWER(s.setting_value) IN ('false', 'disabled', '0', 'off') THEN 'DISABLED'
         ELSE s.setting_value
     END AS status
-FROM config_insights.default.settings_history s
+FROM main.config_insights.settings_history s
 INNER JOIN latest l ON s.collected_at = l.max_ts
 WHERE s.preview_phase IS NOT NULL
   AND s.preview_phase NOT IN ('GA', 'None', '', 'PreviewPhase.GA')
@@ -115,10 +118,10 @@ ORDER BY s.setting_name, s.workspace_name;
 
 -- View: Preview features heatmap (for dashboard visualization)
 -- Produces one row per (feature, workspace) with normalized status
-CREATE OR REPLACE VIEW config_insights.default.preview_heatmap AS
+CREATE OR REPLACE VIEW main.config_insights.preview_heatmap AS
 WITH latest AS (
     SELECT MAX(collected_at) AS max_ts
-    FROM config_insights.default.settings_history
+    FROM main.config_insights.settings_history
 )
 SELECT
     s.setting_name AS feature,
@@ -132,7 +135,7 @@ SELECT
         WHEN LOWER(s.setting_value) IN ('false', 'disabled', '0', 'off') THEN 'DISABLED'
         ELSE 'OTHER'
     END AS status
-FROM config_insights.default.settings_history s
+FROM main.config_insights.settings_history s
 INNER JOIN latest l ON s.collected_at = l.max_ts
 WHERE s.preview_phase IS NOT NULL
   AND s.preview_phase NOT IN ('GA', 'None', '', 'PreviewPhase.GA')
@@ -141,9 +144,9 @@ ORDER BY s.setting_name, s.workspace_name;
 
 -- Note: Drift detection is handled by Lakehouse Monitoring (TimeSeries profile).
 -- After the monitor is created, drift metrics are automatically written to:
---   config_insights.monitoring.settings_history_drift_metrics
+--   main.config_insights.settings_history_drift_metrics
 -- Profile metrics are written to:
---   config_insights.monitoring.settings_history_profile_metrics
+--   main.config_insights.settings_history_profile_metrics
 -- These tables are auto-generated and maintained by the platform.
 --
 -- WHY TimeSeries (not Snapshot):

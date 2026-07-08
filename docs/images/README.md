@@ -1,13 +1,12 @@
 # Dashboard screenshots
 
-The main `README.md` references four screenshots, one per dashboard page:
+The main `README.md` references three screenshots, one per dashboard page:
 
 | File | Dashboard page |
 |---|---|
 | `01-account-overview.png` | Account Overview |
 | `02-preview-heatmap.png` | Preview Features Heatmap |
 | `03-configuration-drift.png` | Configuration Drift |
-| `04-security-posture.png` | Security Posture |
 
 ## How to capture / refresh them
 

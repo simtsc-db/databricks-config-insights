@@ -2,11 +2,31 @@ resources:
   alerts:
     drift_detected:
       display_name: "[${bundle.target}] Config Drift Detected"
+      # Counts settings whose value changed between the two most recent
+      # collection runs. Single scan of settings_history (ranked snapshots),
+      # matching the dashboard's Configuration Drift page.
       query_text: |
+        WITH runs AS (
+          SELECT collected_at,
+                 DENSE_RANK() OVER (ORDER BY collected_at DESC) AS rnk
+          FROM (SELECT DISTINCT collected_at FROM ${var.catalog}.${var.schema}.settings_history)
+        ),
+        snap AS (
+          SELECT h.setting_name, COALESCE(h.workspace_id, 0) AS ws, h.setting_value, r.rnk
+          FROM ${var.catalog}.${var.schema}.settings_history h
+          JOIN runs r ON h.collected_at = r.collected_at
+          WHERE r.rnk <= 2
+        ),
+        diff AS (
+          SELECT setting_name, ws,
+                 MAX(CASE WHEN rnk = 1 THEN setting_value END) AS curr_val,
+                 MAX(CASE WHEN rnk = 2 THEN setting_value END) AS prev_val
+          FROM snap
+          GROUP BY setting_name, ws
+        )
         SELECT COUNT(*) AS drift_count
-        FROM ${var.catalog}.monitoring.settings_history_drift_metrics
-        WHERE window.start >= current_timestamp() - INTERVAL 1 DAY
-          AND drift_type = 'CONSECUTIVE'
+        FROM diff
+        WHERE prev_val IS NOT NULL AND curr_val IS NOT NULL AND curr_val <> prev_val
       warehouse_id: ${var.warehouse_id}
       evaluation:
         comparison_operator: "GREATER_THAN"
@@ -28,56 +48,36 @@ resources:
         - level: CAN_RUN
           group_name: "users"
 
-    security_inconsistency:
-      display_name: "[${bundle.target}] Security Setting Inconsistency"
-      query_text: |
-        SELECT COUNT(*) AS inconsistent_count
-        FROM ${var.catalog}.${var.schema}.workspace_comparison
-        WHERE consistency_status = 'INCONSISTENT'
-          AND category = 'security'
-      warehouse_id: ${var.warehouse_id}
-      evaluation:
-        comparison_operator: "GREATER_THAN"
-        source:
-          name: "inconsistent_count"
-          display: "inconsistent_count"
-        threshold:
-          value:
-            double_value: 0
-        notification:
-          notify_on_ok: false
-          subscriptions:
-            - user_email: "${workspace.current_user.userName}"
-      schedule:
-        pause_status: "UNPAUSED"
-        quartz_cron_schedule: "0 0 7 * * ?"
-        timezone_id: "UTC"
-      permissions:
-        - level: CAN_RUN
-          group_name: "users"
-
     new_preview_enabled:
       display_name: "[${bundle.target}] New Preview Feature Enabled"
+      # Fires when a preview feature transitions to enabled between the two most
+      # recent runs (or appears already enabled). Single scan of settings_history,
+      # null-safe workspace join, preview-phase filter aligned with the views.
       query_text: |
-        WITH prev AS (
-          SELECT DISTINCT setting_name, workspace_id, setting_value
-          FROM ${var.catalog}.${var.schema}.settings_history
-          WHERE collected_at = (
-            SELECT MAX(collected_at) FROM ${var.catalog}.${var.schema}.settings_history
-            WHERE collected_at < (SELECT MAX(collected_at) FROM ${var.catalog}.${var.schema}.settings_history)
-          )
-          AND preview_phase IS NOT NULL AND preview_phase NOT IN ('GA')
+        WITH runs AS (
+          SELECT collected_at,
+                 DENSE_RANK() OVER (ORDER BY collected_at DESC) AS rnk
+          FROM (SELECT DISTINCT collected_at FROM ${var.catalog}.${var.schema}.settings_history)
         ),
-        curr AS (
-          SELECT DISTINCT setting_name, workspace_id, setting_value
-          FROM ${var.catalog}.${var.schema}.settings_latest
-          WHERE preview_phase IS NOT NULL AND preview_phase NOT IN ('GA')
+        snap AS (
+          SELECT h.setting_name, COALESCE(h.workspace_id, 0) AS ws, h.setting_value, r.rnk
+          FROM ${var.catalog}.${var.schema}.settings_history h
+          JOIN runs r ON h.collected_at = r.collected_at
+          WHERE r.rnk <= 2
+            AND h.preview_phase IS NOT NULL
+            AND h.preview_phase NOT IN ('GA', 'None', '', 'PreviewPhase.GA')
+        ),
+        diff AS (
+          SELECT setting_name, ws,
+                 MAX(CASE WHEN rnk = 1 THEN setting_value END) AS curr_val,
+                 MAX(CASE WHEN rnk = 2 THEN setting_value END) AS prev_val
+          FROM snap
+          GROUP BY setting_name, ws
         )
         SELECT COUNT(*) AS new_previews
-        FROM curr c
-        LEFT JOIN prev p ON c.setting_name = p.setting_name AND c.workspace_id = p.workspace_id
-        WHERE (p.setting_value IS NULL OR p.setting_value != c.setting_value)
-          AND LOWER(c.setting_value) IN ('true', 'enabled', '1', 'on')
+        FROM diff
+        WHERE LOWER(curr_val) IN ('true', 'enabled', '1', 'on')
+          AND (prev_val IS NULL OR LOWER(prev_val) NOT IN ('true', 'enabled', '1', 'on'))
       warehouse_id: ${var.warehouse_id}
       evaluation:
         comparison_operator: "GREATER_THAN"

@@ -48,7 +48,8 @@ def setup_lakehouse_monitor(
     Args:
         ws_client: Authenticated WorkspaceClient
         table_name: Full 3-level name of the settings table
-        output_schema: Schema for metric tables (e.g., "config_insights.monitoring")
+        output_schema: Schema for metric tables, same catalog.schema as the
+            settings table (e.g., "main.config_insights")
         assets_dir: Workspace path for monitoring assets/dashboard
         schedule_cron: Quartz cron for monitor refresh (default: 8am daily)
         baseline_table: Optional baseline table for drift comparison
