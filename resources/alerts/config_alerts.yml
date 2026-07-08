@@ -1,0 +1,100 @@
+resources:
+  alerts:
+    drift_detected:
+      display_name: "[${bundle.target}] Config Drift Detected"
+      query_text: |
+        SELECT COUNT(*) AS drift_count
+        FROM ${var.catalog}.monitoring.settings_history_drift_metrics
+        WHERE window.start >= current_timestamp() - INTERVAL 1 DAY
+          AND drift_type = 'CONSECUTIVE'
+      warehouse_id: ${var.warehouse_id}
+      evaluation:
+        comparison_operator: "GREATER_THAN"
+        source:
+          name: "drift_count"
+          display: "drift_count"
+        threshold:
+          value:
+            double_value: 0
+        notification:
+          notify_on_ok: false
+          subscriptions:
+            - user_email: "${workspace.current_user.userName}"
+      schedule:
+        pause_status: "UNPAUSED"
+        quartz_cron_schedule: "0 0 7 * * ?"
+        timezone_id: "UTC"
+      permissions:
+        - level: CAN_RUN
+          group_name: "users"
+
+    security_inconsistency:
+      display_name: "[${bundle.target}] Security Setting Inconsistency"
+      query_text: |
+        SELECT COUNT(*) AS inconsistent_count
+        FROM ${var.catalog}.${var.schema}.workspace_comparison
+        WHERE consistency_status = 'INCONSISTENT'
+          AND category = 'security'
+      warehouse_id: ${var.warehouse_id}
+      evaluation:
+        comparison_operator: "GREATER_THAN"
+        source:
+          name: "inconsistent_count"
+          display: "inconsistent_count"
+        threshold:
+          value:
+            double_value: 0
+        notification:
+          notify_on_ok: false
+          subscriptions:
+            - user_email: "${workspace.current_user.userName}"
+      schedule:
+        pause_status: "UNPAUSED"
+        quartz_cron_schedule: "0 0 7 * * ?"
+        timezone_id: "UTC"
+      permissions:
+        - level: CAN_RUN
+          group_name: "users"
+
+    new_preview_enabled:
+      display_name: "[${bundle.target}] New Preview Feature Enabled"
+      query_text: |
+        WITH prev AS (
+          SELECT DISTINCT setting_name, workspace_id, setting_value
+          FROM ${var.catalog}.${var.schema}.settings_history
+          WHERE collected_at = (
+            SELECT MAX(collected_at) FROM ${var.catalog}.${var.schema}.settings_history
+            WHERE collected_at < (SELECT MAX(collected_at) FROM ${var.catalog}.${var.schema}.settings_history)
+          )
+          AND preview_phase IS NOT NULL AND preview_phase NOT IN ('GA')
+        ),
+        curr AS (
+          SELECT DISTINCT setting_name, workspace_id, setting_value
+          FROM ${var.catalog}.${var.schema}.settings_latest
+          WHERE preview_phase IS NOT NULL AND preview_phase NOT IN ('GA')
+        )
+        SELECT COUNT(*) AS new_previews
+        FROM curr c
+        LEFT JOIN prev p ON c.setting_name = p.setting_name AND c.workspace_id = p.workspace_id
+        WHERE (p.setting_value IS NULL OR p.setting_value != c.setting_value)
+          AND LOWER(c.setting_value) IN ('true', 'enabled', '1', 'on')
+      warehouse_id: ${var.warehouse_id}
+      evaluation:
+        comparison_operator: "GREATER_THAN"
+        source:
+          name: "new_previews"
+          display: "new_previews"
+        threshold:
+          value:
+            double_value: 0
+        notification:
+          notify_on_ok: false
+          subscriptions:
+            - user_email: "${workspace.current_user.userName}"
+      schedule:
+        pause_status: "UNPAUSED"
+        quartz_cron_schedule: "0 0 7 * * ?"
+        timezone_id: "UTC"
+      permissions:
+        - level: CAN_RUN
+          group_name: "users"

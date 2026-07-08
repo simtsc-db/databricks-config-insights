@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "config_insights"
+version = "0.3.0"
+description = "Databricks Configuration Insights - dynamic settings discovery with Lakehouse Monitoring"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "databricks-sdk>=0.40.0",
+]
+
+[project.scripts]
+collect = "config_insights.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

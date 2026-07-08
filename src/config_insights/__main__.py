@@ -1,0 +1,222 @@
+"""Entry point for the Config Insights collection job.
+
+Designed to run as a Databricks serverless job task. Uses:
+- AccountClient for cross-workspace discovery
+- SparkSession for Delta writes with schema evolution
+- Lakehouse Monitoring for drift detection (no handcrafted logic)
+
+Environment variables / job parameters:
+  CONFIG_CATALOG  - Output catalog (default: config_insights)
+  CONFIG_SCHEMA   - Output schema (default: default)
+"""
+
+import argparse
+import logging
+import os
+import sys
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("config_insights")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Databricks Configuration Insights - Dynamic Collector"
+    )
+    parser.add_argument(
+        "--catalog",
+        default=os.environ.get("CONFIG_CATALOG", "config_insights"),
+    )
+    parser.add_argument(
+        "--schema",
+        default=os.environ.get("CONFIG_SCHEMA", "default"),
+    )
+    parser.add_argument(
+        "--account-id",
+        default=os.environ.get("DATABRICKS_ACCOUNT_ID"),
+        help="Databricks account ID for cross-workspace scanning",
+    )
+    parser.add_argument(
+        "--workspace-ids",
+        default=None,
+        help="Comma-separated workspace IDs to scan (default: all)",
+    )
+    parser.add_argument(
+        "--setup-monitor",
+        action="store_true",
+        help="Create/update Lakehouse Monitor after collection",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Collect and print settings without writing to Delta",
+    )
+    args = parser.parse_args()
+
+    catalog = args.catalog
+    schema = args.schema
+    table_name = f"{catalog}.{schema}.settings_history"
+    view_latest = f"{catalog}.{schema}.settings_latest"
+    view_comparison = f"{catalog}.{schema}.workspace_comparison"
+    monitoring_schema = f"{catalog}.monitoring"
+
+    # Parse workspace filter
+    workspace_filter = None
+    if args.workspace_ids:
+        workspace_filter = [
+            int(ws.strip()) for ws in args.workspace_ids.split(",")
+        ]
+
+    # Initialize clients
+    from databricks.sdk import AccountClient, WorkspaceClient
+    from config_insights.collector import ConfigInsightsCollector
+
+    records = None
+
+    # Set account ID from CLI arg so AccountClient picks it up
+    if args.account_id:
+        os.environ["DATABRICKS_ACCOUNT_ID"] = args.account_id
+
+    # Try account-level collection first (requires account admin credentials)
+    if args.account_id:
+        try:
+            account_client = AccountClient(account_id=args.account_id)
+            logger.info("Connected to account: %s", account_client.config.account_id)
+            collector = ConfigInsightsCollector(
+                account_client=account_client,
+                workspace_filter=workspace_filter,
+            )
+            records = collector.collect_all()
+        except Exception as e:
+            logger.warning(
+                "Account-level collection failed (%s). "
+                "Falling back to workspace-only mode.",
+                e,
+            )
+
+    if records is None:
+        # Workspace-only mode: collect settings for the current workspace
+        from config_insights.discovery import discover_workspace_settings
+        from databricks.sdk.service.provisioning import Workspace
+        from datetime import datetime, timezone as tz
+
+        ws_client = WorkspaceClient()
+
+        # Resolve workspace ID (try multiple sources)
+        workspace_id = 0
+        try:
+            workspace_id = int(ws_client.get_workspace_id())
+        except Exception:
+            pass
+        if workspace_id == 0:
+            try:
+                from pyspark.sql import SparkSession as _Spark
+                _s = _Spark.builder.getOrCreate()
+                workspace_id = int(_s.conf.get("spark.databricks.clusterUsageTags.orgId", "0"))
+            except Exception:
+                pass
+        if workspace_id == 0:
+            try:
+                workspace_id = int(os.environ.get("DATABRICKS_WORKSPACE_ID", "0"))
+            except (ValueError, TypeError):
+                pass
+
+        # Resolve workspace name (try deployment name from status API)
+        workspace_name = ws_client.config.host.replace("https://", "").split(".")[0]
+        try:
+            status = ws_client.workspace.get_status("/")
+            deployment_name = ws_client.config.host.replace("https://", "").replace(".cloud.databricks.com", "")
+            if deployment_name:
+                workspace_name = deployment_name
+        except Exception:
+            pass
+
+        ws_obj = Workspace(
+            workspace_id=workspace_id,
+            workspace_name=workspace_name,
+        )
+        collected_at = datetime.now(tz.utc)
+        account_id = args.account_id or "unknown"
+
+        logger.info("Workspace-only mode: scanning %s (ID: %s)", workspace_name, workspace_id)
+        records = discover_workspace_settings(
+            ws_client, ws_obj, collected_at, account_id
+        )
+
+    if args.dry_run:
+        logger.info("DRY RUN: %d records collected", len(records))
+        for r in records[:20]:
+            logger.info(
+                "  [%s] %s/%s = %s",
+                r["scope"],
+                r.get("workspace_name", "account"),
+                r["setting_name"],
+                r["setting_value"][:80],
+            )
+        if len(records) > 20:
+            logger.info("  ... and %d more", len(records) - 20)
+        return 0
+
+    # Write to Delta with schema evolution
+    from pyspark.sql import SparkSession
+    from config_insights.writer import (
+        write_settings,
+        ensure_table_properties,
+        create_latest_snapshot_view,
+        create_pivot_view,
+        create_heatmap_view,
+    )
+
+    spark = SparkSession.builder.getOrCreate()
+
+    # Ensure schema exists (catalog must already exist)
+    spark.sql(f"USE CATALOG {catalog}")
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}")
+
+    # Write with schema evolution (new settings = new rows, not columns)
+    write_settings(spark, records, table_name)
+
+    # Set table properties for Lakehouse Monitoring
+    ensure_table_properties(spark, table_name)
+
+    # Create convenience views
+    create_latest_snapshot_view(spark, table_name, view_latest)
+    create_pivot_view(spark, table_name, view_comparison)
+    create_heatmap_view(
+        spark, table_name, f"{catalog}.{schema}.preview_heatmap"
+    )
+
+    logger.info("Collection complete: %d settings written to %s", len(records), table_name)
+
+    from config_insights.monitoring import (
+        setup_lakehouse_monitor,
+        refresh_monitor,
+    )
+
+    ws_client = WorkspaceClient()
+
+    # Create/update the monitor if requested (first run or config change)
+    if args.setup_monitor:
+        spark.sql(f"CREATE SCHEMA IF NOT EXISTS {monitoring_schema}")
+
+        monitor_info = setup_lakehouse_monitor(
+            ws_client=ws_client,
+            table_name=table_name,
+            output_schema=monitoring_schema,
+            assets_dir=f"/Workspace/Shared/config_insights/monitoring",
+        )
+        logger.info("Monitor info: %s", monitor_info)
+
+    # Always trigger a monitor refresh after writing new data so drift
+    # metrics are computed immediately rather than waiting for the cron schedule.
+    refresh_monitor(ws_client, table_name)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

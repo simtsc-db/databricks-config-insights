@@ -1,0 +1,46 @@
+bundle:
+  name: config-insights
+
+# Resource definitions are split by type for clarity.
+include:
+  - resources/jobs/*.yml
+  - resources/dashboards/*.yml
+  - resources/alerts/*.yml
+
+# The collector wheel is built automatically on `databricks bundle deploy`.
+# No manual `python -m build` step is required.
+artifacts:
+  config_insights_wheel:
+    type: whl
+    build: python3 -m build --wheel
+    path: .
+
+variables:
+  catalog:
+    description: Unity Catalog that stores the settings tables, views and monitor output.
+    default: main
+  schema:
+    description: Schema within the catalog for the settings tables and views.
+    default: config_insights
+  warehouse_id:
+    description: SQL warehouse ID used by the dashboard and the SQL alerts.
+  account_id:
+    description: >
+      (Optional) Databricks account ID for cross-workspace scanning. Requires the
+      job identity to be an account admin. Leave empty to scan only the current
+      workspace.
+    default: ""
+
+targets:
+  # Personal / sandbox deployment. Uses the host from your CLI profile (-p) or
+  # DATABRICKS_HOST, so nothing workspace-specific is committed to the repo.
+  dev:
+    mode: development
+    default: true
+
+  # Shared / production deployment. Runs the collector as a service principal.
+  prod:
+    mode: production
+    # Uncomment and set once you have a service principal for the collector:
+    # run_as:
+    #   service_principal_name: config-insights-sp

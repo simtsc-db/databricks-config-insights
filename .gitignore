@@ -1,0 +1,17 @@
+# Databricks Asset Bundle state
+.databricks/
+
+# Python build artifacts
+dist/
+build/
+*.egg-info/
+__pycache__/
+*.py[cod]
+
+# Local env
+.env
+.venv/
+venv/
+
+# OS
+.DS_Store

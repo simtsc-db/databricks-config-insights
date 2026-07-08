@@ -1,0 +1,503 @@
+{
+  "datasets": [
+    {
+      "name": "total_settings_ds",
+      "displayName": "Total Settings",
+      "query": "SELECT COUNT(DISTINCT setting_name) AS total_settings FROM settings_latest"
+    },
+    {
+      "name": "workspace_count_ds",
+      "displayName": "Workspace Count",
+      "query": "SELECT COUNT(DISTINCT workspace_id) AS workspace_count FROM settings_latest WHERE scope = 'workspace'"
+    },
+    {
+      "name": "preview_count_ds",
+      "displayName": "Preview Count",
+      "query": "SELECT COUNT(DISTINCT feature) AS preview_count FROM preview_heatmap"
+    },
+    {
+      "name": "category_breakdown_ds",
+      "displayName": "Category Breakdown",
+      "query": "SELECT category, COUNT(DISTINCT setting_name) AS setting_count FROM settings_latest GROUP BY category ORDER BY setting_count DESC"
+    },
+    {
+      "name": "scope_breakdown_ds",
+      "displayName": "Scope Breakdown",
+      "query": "SELECT scope, COUNT(*) AS setting_count FROM settings_latest GROUP BY scope"
+    },
+    {
+      "name": "collection_history_ds",
+      "displayName": "Collection History",
+      "query": "SELECT collected_at, COUNT(*) AS settings_count, COUNT(DISTINCT workspace_id) AS workspaces FROM settings_history GROUP BY collected_at ORDER BY collected_at DESC LIMIT 10"
+    },
+    {
+      "name": "preview_heatmap_ds",
+      "displayName": "Preview Features Heatmap",
+      "query": "SELECT feature, description, preview_phase, workspace_name, status FROM preview_heatmap ORDER BY feature, workspace_name"
+    },
+    {
+      "name": "preview_by_workspace_ds",
+      "displayName": "Previews by Workspace",
+      "query": "SELECT workspace_name, preview_phase, status, COUNT(*) AS feature_count FROM preview_heatmap GROUP BY workspace_name, preview_phase, status ORDER BY feature_count DESC"
+    },
+    {
+      "name": "config_drift_ds",
+      "displayName": "Configuration Drift",
+      "query": "WITH ordered AS (SELECT setting_name, workspace_name, workspace_id, category, setting_value, collected_at, LAG(setting_value) OVER (PARTITION BY setting_name, COALESCE(workspace_id, 0) ORDER BY collected_at) AS previous_value, LAG(collected_at) OVER (PARTITION BY setting_name, COALESCE(workspace_id, 0) ORDER BY collected_at) AS previous_collected_at FROM settings_history) SELECT DATE(collected_at) AS change_date, setting_name, workspace_name, category, previous_value, setting_value AS new_value, collected_at AS detected_at FROM ordered WHERE previous_value IS NOT NULL AND setting_value != previous_value ORDER BY collected_at DESC"
+    },
+    {
+      "name": "inconsistencies_ds",
+      "displayName": "Inconsistent Settings",
+      "query": "SELECT setting_name, category, distinct_values, workspace_count, sample_value, consistency_status FROM workspace_comparison ORDER BY consistency_status, distinct_values DESC"
+    },
+    {
+      "name": "security_settings_ds",
+      "displayName": "Security Settings",
+      "query": "SELECT workspace_name, setting_name, setting_value, category, description FROM settings_latest WHERE category = 'security' OR LOWER(setting_name) LIKE '%security%' OR LOWER(setting_name) LIKE '%csp%' OR LOWER(setting_name) LIKE '%encrypt%' OR LOWER(setting_name) LIKE '%token%' OR LOWER(setting_name) LIKE '%ip_access%' OR LOWER(setting_name) LIKE '%disable_legacy%' ORDER BY setting_name, workspace_name"
+    }
+  ],
+  "pages": [
+    {
+      "name": "overview",
+      "displayName": "Account Overview",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "title",
+            "multilineTextboxSpec": {"lines": ["## Configuration Insights"]}
+          },
+          "position": {"x": 0, "y": 0, "width": 12, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "total-settings",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "total_settings_ds",
+                "fields": [{"name": "total_settings", "expression": "`total_settings`"}],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {"fieldName": "total_settings", "displayName": "Settings Discovered"}
+              },
+              "frame": {"showTitle": true, "title": "Settings Discovered"}
+            }
+          },
+          "position": {"x": 0, "y": 1, "width": 4, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "workspace-count",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "workspace_count_ds",
+                "fields": [{"name": "workspace_count", "expression": "`workspace_count`"}],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {"fieldName": "workspace_count", "displayName": "Workspaces Scanned"}
+              },
+              "frame": {"showTitle": true, "title": "Workspaces Scanned"}
+            }
+          },
+          "position": {"x": 4, "y": 1, "width": 4, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "preview-count",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "preview_count_ds",
+                "fields": [{"name": "preview_count", "expression": "`preview_count`"}],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {"fieldName": "preview_count", "displayName": "Preview Features"}
+              },
+              "frame": {"showTitle": true, "title": "Preview Features"}
+            }
+          },
+          "position": {"x": 8, "y": 1, "width": 4, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "category-chart",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "category_breakdown_ds",
+                "fields": [
+                  {"name": "category", "expression": "`category`"},
+                  {"name": "setting_count", "expression": "`setting_count`"}
+                ],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {"fieldName": "category", "scale": {"type": "categorical"}, "displayName": "Category"},
+                "y": {"fieldName": "setting_count", "scale": {"type": "quantitative"}, "displayName": "Settings Count"}
+              },
+              "frame": {"showTitle": true, "title": "Settings by Category"}
+            }
+          },
+          "position": {"x": 0, "y": 4, "width": 6, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "scope-chart",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "scope_breakdown_ds",
+                "fields": [
+                  {"name": "scope", "expression": "`scope`"},
+                  {"name": "setting_count", "expression": "`setting_count`"}
+                ],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 3,
+              "widgetType": "pie",
+              "encodings": {
+                "angle": {"fieldName": "setting_count", "scale": {"type": "quantitative"}, "displayName": "Count"},
+                "color": {"fieldName": "scope", "scale": {"type": "categorical"}, "displayName": "Scope"}
+              },
+              "frame": {"showTitle": true, "title": "Settings by Scope"}
+            }
+          },
+          "position": {"x": 6, "y": 4, "width": 6, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "collection-history",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "collection_history_ds",
+                "fields": [
+                  {"name": "collected_at", "expression": "`collected_at`"},
+                  {"name": "settings_count", "expression": "`settings_count`"},
+                  {"name": "workspaces", "expression": "`workspaces`"}
+                ],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {"fieldName": "collected_at", "displayName": "Collected At"},
+                  {"fieldName": "settings_count", "displayName": "Settings"},
+                  {"fieldName": "workspaces", "displayName": "Workspaces"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Collection History"}
+            }
+          },
+          "position": {"x": 0, "y": 9, "width": 12, "height": 5}
+        }
+      ]
+    },
+    {
+      "name": "heatmap",
+      "displayName": "Preview Features Heatmap",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "heatmap-title",
+            "multilineTextboxSpec": {"lines": ["## Preview Features Heatmap"]}
+          },
+          "position": {"x": 0, "y": 0, "width": 12, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "heatmap-description",
+            "multilineTextboxSpec": {"lines": ["Shows all preview features and their status (ENABLED/DISABLED) per workspace. Use the table to identify which previews are active and which are not yet turned on."]}
+          },
+          "position": {"x": 0, "y": 1, "width": 12, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "preview-heatmap-table",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "preview_heatmap_ds",
+                "fields": [
+                  {"name": "feature", "expression": "`feature`"},
+                  {"name": "preview_phase", "expression": "`preview_phase`"},
+                  {"name": "workspace_name", "expression": "`workspace_name`"},
+                  {"name": "status", "expression": "`status`"},
+                  {"name": "description", "expression": "`description`"}
+                ],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {"fieldName": "feature", "displayName": "Feature"},
+                  {"fieldName": "preview_phase", "displayName": "Phase"},
+                  {"fieldName": "workspace_name", "displayName": "Workspace"},
+                  {"fieldName": "status", "displayName": "Status"},
+                  {"fieldName": "description", "displayName": "Description"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Preview Features by Workspace"}
+            }
+          },
+          "position": {"x": 0, "y": 2, "width": 12, "height": 8}
+        },
+        {
+          "widget": {
+            "name": "preview-status-bar",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "preview_heatmap_ds",
+                "fields": [
+                  {"name": "status", "expression": "`status`"},
+                  {"name": "count(feature)", "expression": "COUNT(`feature`)"}
+                ],
+                "disaggregated": false
+              }
+            }],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {"fieldName": "status", "scale": {"type": "categorical"}, "displayName": "Status"},
+                "y": {"fieldName": "count(feature)", "scale": {"type": "quantitative"}, "displayName": "Feature Count"}
+              },
+              "frame": {"showTitle": true, "title": "Preview Features by Status"}
+            }
+          },
+          "position": {"x": 0, "y": 10, "width": 6, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "preview-phase-bar",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "preview_heatmap_ds",
+                "fields": [
+                  {"name": "preview_phase", "expression": "`preview_phase`"},
+                  {"name": "count(feature)", "expression": "COUNT(`feature`)"}
+                ],
+                "disaggregated": false
+              }
+            }],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {"fieldName": "preview_phase", "scale": {"type": "categorical"}, "displayName": "Phase"},
+                "y": {"fieldName": "count(feature)", "scale": {"type": "quantitative"}, "displayName": "Feature Count"}
+              },
+              "frame": {"showTitle": true, "title": "Preview Features by Phase"}
+            }
+          },
+          "position": {"x": 6, "y": 10, "width": 6, "height": 5}
+        }
+      ]
+    },
+    {
+      "name": "configuration-drift",
+      "displayName": "Configuration Drift",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "drift-title",
+            "multilineTextboxSpec": {"lines": ["## Configuration Drift"]}
+          },
+          "position": {"x": 0, "y": 0, "width": 12, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "drift-description",
+            "multilineTextboxSpec": {"lines": ["Tracks setting value changes between collection runs. Click a bar to filter the table below. Note: the Settings API does not expose who made the change; check the audit log for attribution."]}
+          },
+          "position": {"x": 0, "y": 1, "width": 12, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "drift-per-day-bar",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "config_drift_ds",
+                "fields": [
+                  {"name": "change_date", "expression": "`change_date`"},
+                  {"name": "count(setting_name)", "expression": "COUNT(`setting_name`)"}
+                ],
+                "disaggregated": false
+              }
+            }],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {"fieldName": "change_date", "scale": {"type": "temporal"}, "displayName": "Date"},
+                "y": {"fieldName": "count(setting_name)", "scale": {"type": "quantitative"}, "displayName": "Changes"}
+              },
+              "frame": {"showTitle": true, "title": "Configuration Changes per Day"}
+            }
+          },
+          "position": {"x": 0, "y": 2, "width": 12, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "drift-detail-table",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "config_drift_ds",
+                "fields": [
+                  {"name": "change_date", "expression": "`change_date`"},
+                  {"name": "setting_name", "expression": "`setting_name`"},
+                  {"name": "workspace_name", "expression": "`workspace_name`"},
+                  {"name": "category", "expression": "`category`"},
+                  {"name": "previous_value", "expression": "`previous_value`"},
+                  {"name": "new_value", "expression": "`new_value`"},
+                  {"name": "detected_at", "expression": "`detected_at`"}
+                ],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {"fieldName": "change_date", "displayName": "Date"},
+                  {"fieldName": "setting_name", "displayName": "Setting"},
+                  {"fieldName": "workspace_name", "displayName": "Workspace"},
+                  {"fieldName": "category", "displayName": "Category"},
+                  {"fieldName": "previous_value", "displayName": "Previous Value"},
+                  {"fieldName": "new_value", "displayName": "New Value"},
+                  {"fieldName": "detected_at", "displayName": "Detected At"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Change Details"}
+            }
+          },
+          "position": {"x": 0, "y": 7, "width": 12, "height": 7}
+        },
+        {
+          "widget": {
+            "name": "inconsistencies-table",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "inconsistencies_ds",
+                "fields": [
+                  {"name": "setting_name", "expression": "`setting_name`"},
+                  {"name": "category", "expression": "`category`"},
+                  {"name": "distinct_values", "expression": "`distinct_values`"},
+                  {"name": "workspace_count", "expression": "`workspace_count`"},
+                  {"name": "sample_value", "expression": "`sample_value`"},
+                  {"name": "consistency_status", "expression": "`consistency_status`"}
+                ],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {"fieldName": "setting_name", "displayName": "Setting"},
+                  {"fieldName": "category", "displayName": "Category"},
+                  {"fieldName": "consistency_status", "displayName": "Status"},
+                  {"fieldName": "distinct_values", "displayName": "Distinct Values"},
+                  {"fieldName": "workspace_count", "displayName": "Workspaces"},
+                  {"fieldName": "sample_value", "displayName": "Sample Value"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Cross-Workspace Consistency"}
+            }
+          },
+          "position": {"x": 0, "y": 14, "width": 12, "height": 6}
+        }
+      ]
+    },
+    {
+      "name": "security",
+      "displayName": "Security Posture",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "security-title",
+            "multilineTextboxSpec": {"lines": ["## Security Posture"]}
+          },
+          "position": {"x": 0, "y": 0, "width": 12, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "security-table",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "security_settings_ds",
+                "fields": [
+                  {"name": "workspace_name", "expression": "`workspace_name`"},
+                  {"name": "setting_name", "expression": "`setting_name`"},
+                  {"name": "setting_value", "expression": "`setting_value`"},
+                  {"name": "category", "expression": "`category`"},
+                  {"name": "description", "expression": "`description`"}
+                ],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {"fieldName": "workspace_name", "displayName": "Workspace"},
+                  {"fieldName": "setting_name", "displayName": "Setting"},
+                  {"fieldName": "setting_value", "displayName": "Value"},
+                  {"fieldName": "category", "displayName": "Category"},
+                  {"fieldName": "description", "displayName": "Description"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Security-Related Settings"}
+            }
+          },
+          "position": {"x": 0, "y": 1, "width": 12, "height": 8}
+        }
+      ]
+    }
+  ]
+}
