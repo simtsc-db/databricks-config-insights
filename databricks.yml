@@ -42,6 +42,10 @@ targets:
   # Shared / production deployment. Runs the collector as a service principal.
   prod:
     mode: production
+    # Production mode requires an explicit, stable root path so only one copy
+    # is ever deployed. Point this at a shared or service-principal location.
+    workspace:
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
     # Uncomment and set once you have a service principal for the collector:
     # run_as:
     #   service_principal_name: config-insights-sp
