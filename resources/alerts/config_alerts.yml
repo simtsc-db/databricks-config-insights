@@ -2,31 +2,31 @@ resources:
   alerts:
     drift_detected:
       display_name: "[${bundle.target}] Config Drift Detected"
-      # Counts settings whose value changed between the two most recent
-      # collection runs. Single scan of settings_history (ranked snapshots),
-      # matching the dashboard's Configuration Drift page.
+      # Counts settings whose value changed vs. their previous observation.
+      # A single LAG() window compares each setting to its own prior snapshot
+      # (no run-timestamp alignment needed, no temporal filter needed). The
+      # `changed_settings` column rides along so the notification shows exactly
+      # what changed. Always returns exactly one row.
       query_text: |
-        WITH runs AS (
-          SELECT collected_at,
-                 DENSE_RANK() OVER (ORDER BY collected_at DESC) AS rnk
-          FROM (SELECT DISTINCT collected_at FROM ${var.catalog}.${var.schema}.settings_history)
-        ),
-        snap AS (
-          SELECT h.setting_name, COALESCE(h.workspace_id, 0) AS ws, h.setting_value, r.rnk
-          FROM ${var.catalog}.${var.schema}.settings_history h
-          JOIN runs r ON h.collected_at = r.collected_at
-          WHERE r.rnk <= 2
-        ),
-        diff AS (
-          SELECT setting_name, ws,
-                 MAX(CASE WHEN rnk = 1 THEN setting_value END) AS curr_val,
-                 MAX(CASE WHEN rnk = 2 THEN setting_value END) AS prev_val
-          FROM snap
-          GROUP BY setting_name, ws
-        )
-        SELECT COUNT(*) AS drift_count
-        FROM diff
-        WHERE prev_val IS NOT NULL AND curr_val IS NOT NULL AND curr_val <> prev_val
+        SELECT
+          COUNT(*) AS drift_count,
+          COALESCE(array_join(collect_list(
+            concat(setting_name, ' [ws ', CAST(ws AS STRING), ']: ',
+                   COALESCE(prev_val, '(none)'), ' -> ', COALESCE(curr_val, '(none)'))
+          ), '; '), '') AS changed_settings
+        FROM (
+          SELECT setting_name,
+                 COALESCE(workspace_id, 0) AS ws,
+                 setting_value AS curr_val,
+                 LAG(setting_value) OVER (
+                   PARTITION BY setting_name, COALESCE(workspace_id, 0)
+                   ORDER BY collected_at) AS prev_val
+          FROM ${var.catalog}.${var.schema}.settings_history
+          QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY setting_name, COALESCE(workspace_id, 0)
+                    ORDER BY collected_at DESC) = 1
+        ) latest
+        WHERE prev_val IS NOT NULL AND curr_val <> prev_val
       warehouse_id: ${var.warehouse_id}
       evaluation:
         comparison_operator: "GREATER_THAN"
@@ -50,32 +50,33 @@ resources:
 
     new_preview_enabled:
       display_name: "[${bundle.target}] New Preview Feature Enabled"
-      # Fires when a preview feature transitions to enabled between the two most
-      # recent runs (or appears already enabled). Single scan of settings_history,
-      # null-safe workspace join, preview-phase filter aligned with the views.
+      # Fires when a preview feature flips to enabled vs. its previous
+      # observation (or appears already enabled on first sight). A single LAG()
+      # window compares each preview setting to its own prior snapshot; the
+      # preview-phase filter is aligned with the dashboard views. The
+      # `enabled_previews` column rides along for the notification. Always
+      # returns exactly one row.
       query_text: |
-        WITH runs AS (
-          SELECT collected_at,
-                 DENSE_RANK() OVER (ORDER BY collected_at DESC) AS rnk
-          FROM (SELECT DISTINCT collected_at FROM ${var.catalog}.${var.schema}.settings_history)
-        ),
-        snap AS (
-          SELECT h.setting_name, COALESCE(h.workspace_id, 0) AS ws, h.setting_value, r.rnk
-          FROM ${var.catalog}.${var.schema}.settings_history h
-          JOIN runs r ON h.collected_at = r.collected_at
-          WHERE r.rnk <= 2
-            AND h.preview_phase IS NOT NULL
-            AND h.preview_phase NOT IN ('GA', 'None', '', 'PreviewPhase.GA')
-        ),
-        diff AS (
-          SELECT setting_name, ws,
-                 MAX(CASE WHEN rnk = 1 THEN setting_value END) AS curr_val,
-                 MAX(CASE WHEN rnk = 2 THEN setting_value END) AS prev_val
-          FROM snap
-          GROUP BY setting_name, ws
-        )
-        SELECT COUNT(*) AS new_previews
-        FROM diff
+        SELECT
+          COUNT(*) AS new_previews,
+          COALESCE(array_join(collect_list(
+            concat(setting_name, ' [ws ', CAST(ws AS STRING), ']: ',
+                   COALESCE(prev_val, '(new)'), ' -> ', COALESCE(curr_val, '(none)'))
+          ), '; '), '') AS enabled_previews
+        FROM (
+          SELECT setting_name,
+                 COALESCE(workspace_id, 0) AS ws,
+                 setting_value AS curr_val,
+                 LAG(setting_value) OVER (
+                   PARTITION BY setting_name, COALESCE(workspace_id, 0)
+                   ORDER BY collected_at) AS prev_val
+          FROM ${var.catalog}.${var.schema}.settings_history
+          WHERE preview_phase IS NOT NULL
+            AND preview_phase NOT IN ('GA', 'None', '', 'PreviewPhase.GA')
+          QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY setting_name, COALESCE(workspace_id, 0)
+                    ORDER BY collected_at DESC) = 1
+        ) latest
         WHERE LOWER(curr_val) IN ('true', 'enabled', '1', 'on')
           AND (prev_val IS NULL OR LOWER(prev_val) NOT IN ('true', 'enabled', '1', 'on'))
       warehouse_id: ${var.warehouse_id}
