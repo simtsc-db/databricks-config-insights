@@ -5,8 +5,8 @@ Design principles:
   via the Settings V2 list_*_settings_metadata() endpoints.
 - Schema evolution: new settings discovered in future runs are automatically
   added as columns to the pivoted snapshot table.
-- Lakehouse Monitoring handles drift detection via its built-in TimeSeries
-  profile and drift metrics table.
+- Drift detection is handled downstream in SQL (dashboard + alerts) via exact
+  snapshot-to-snapshot comparison.
 """
 
 import logging

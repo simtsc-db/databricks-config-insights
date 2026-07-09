@@ -4,11 +4,12 @@ resources:
       name: "[${bundle.target}] Config Insights - Collector"
       description: >
         Dynamically discovers and collects all account and workspace settings
-        via the Settings V2 metadata API. Writes to Delta with schema evolution.
-        Lakehouse Monitoring handles drift detection automatically.
+        via the Settings V2 metadata API. Writes to Delta with schema evolution;
+        drift is detected by the dashboard and SQL alerts via exact
+        snapshot-to-snapshot comparison.
 
-      # Runs daily at 06:00 UTC. The monitor refresh (06:30) and the alerts
-      # (07:00) are scheduled to run after collection completes.
+      # Runs daily at 06:00 UTC. The SQL alerts (07:00) are scheduled to run
+      # after collection completes.
       schedule:
         quartz_cron_expression: "0 0 6 * * ?"
         timezone_id: "UTC"
@@ -29,7 +30,6 @@ resources:
               - ${var.schema}
               - "--account-id"
               - ${var.account_id}
-              - "--setup-monitor"
           environment_key: default
 
       # Serverless compute environment. The collector wheel is built by the
@@ -40,7 +40,7 @@ resources:
             client: "1"
             dependencies:
               - databricks-sdk>=0.40.0
-              - ../../dist/config_insights-0.3.0-py3-none-any.whl
+              - ../../dist/config_insights-0.4.0-py3-none-any.whl
 
       permissions:
         - level: CAN_VIEW

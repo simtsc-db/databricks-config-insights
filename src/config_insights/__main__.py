@@ -3,7 +3,9 @@
 Designed to run as a Databricks serverless job task. Uses:
 - AccountClient for cross-workspace discovery
 - SparkSession for Delta writes with schema evolution
-- Lakehouse Monitoring for drift detection (no handcrafted logic)
+
+Drift detection is handled downstream by the dashboard and SQL alerts via
+exact snapshot-to-snapshot comparison of settings_history.
 
 Environment variables / job parameters:
   CONFIG_CATALOG  - Output catalog (default: config_insights)
@@ -46,11 +48,6 @@ def main() -> int:
         help="Comma-separated workspace IDs to scan (default: all)",
     )
     parser.add_argument(
-        "--setup-monitor",
-        action="store_true",
-        help="Create/update Lakehouse Monitor after collection",
-    )
-    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Collect and print settings without writing to Delta",
@@ -62,10 +59,6 @@ def main() -> int:
     table_name = f"{catalog}.{schema}.settings_history"
     view_latest = f"{catalog}.{schema}.settings_latest"
     view_comparison = f"{catalog}.{schema}.workspace_comparison"
-    # Lakehouse Monitoring metric tables live in the same catalog.schema as the
-    # settings table (harmonized single location). Their names are suffixed by
-    # the platform (settings_history_profile_metrics / _drift_metrics).
-    monitoring_schema = f"{catalog}.{schema}"
 
     # Parse workspace filter
     workspace_filter = None
@@ -190,7 +183,8 @@ def main() -> int:
     # Write with schema evolution (new settings = new rows, not columns)
     write_settings(spark, records, table_name)
 
-    # Set table properties for Lakehouse Monitoring
+    # Keep the table performant (auto-optimize); CDF stays enabled for any
+    # downstream incremental consumers.
     ensure_table_properties(spark, table_name)
 
     # Create convenience views
@@ -201,29 +195,6 @@ def main() -> int:
     )
 
     logger.info("Collection complete: %d settings written to %s", len(records), table_name)
-
-    from config_insights.monitoring import (
-        setup_lakehouse_monitor,
-        refresh_monitor,
-    )
-
-    ws_client = WorkspaceClient()
-
-    # Create/update the monitor if requested (first run or config change).
-    # The monitoring output schema is the same as the settings schema (created
-    # above), so no extra CREATE SCHEMA is needed.
-    if args.setup_monitor:
-        monitor_info = setup_lakehouse_monitor(
-            ws_client=ws_client,
-            table_name=table_name,
-            output_schema=monitoring_schema,
-            assets_dir=f"/Workspace/Shared/config_insights/monitoring",
-        )
-        logger.info("Monitor info: %s", monitor_info)
-
-    # Always trigger a monitor refresh after writing new data so drift
-    # metrics are computed immediately rather than waiting for the cron schedule.
-    refresh_monitor(ws_client, table_name)
 
     return 0
 

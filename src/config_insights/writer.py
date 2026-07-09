@@ -4,9 +4,9 @@ Writes collected settings to a Delta table using schema evolution
 (mergeSchema=true) so that newly discovered settings or metadata
 fields are automatically added as columns without manual DDL changes.
 
-The table uses a TimeSeries-friendly layout with a `collected_at`
-timestamp column, enabling Lakehouse Monitoring to compute drift
-metrics across time windows automatically.
+The table keeps a `collected_at` timestamp on every row so that the
+dashboard and SQL alerts can compare snapshots and detect drift
+(value changes, added/removed settings) with exact SQL.
 """
 
 import logging
@@ -62,7 +62,6 @@ def write_settings(
 
     df = spark.createDataFrame(records, schema=SETTINGS_TABLE_SCHEMA)
 
-    # Enable CDF for efficient Lakehouse Monitoring incremental processing
     df.write.format("delta").mode("append").option(
         "mergeSchema", "true"
     ).saveAsTable(table_name)
@@ -71,10 +70,11 @@ def write_settings(
 
 
 def ensure_table_properties(spark: SparkSession, table_name: str) -> None:
-    """Set table properties required for Lakehouse Monitoring.
+    """Set Delta table properties.
 
-    - delta.enableChangeDataFeed: enables incremental monitoring
     - delta.autoOptimize: keeps the table performant
+    - delta.enableChangeDataFeed: kept on for any downstream incremental
+      consumers (harmless if unused)
     """
     spark.sql(f"""
         ALTER TABLE {table_name}

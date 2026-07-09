@@ -2,12 +2,12 @@
 
 Discover, track, and monitor **every** account and workspace setting — including
 **preview features** — across your Databricks estate, with zero hardcoded setting
-lists and platform-native drift detection.
+lists and exact, per-setting drift detection.
 
 The tool packages everything as a **Databricks Asset Bundle (DAB)**: a scheduled
-collection **job**, an AI/BI **dashboard**, two SQL **alerts**, and a Lakehouse
-**monitor**. Deploy it straight from a Databricks Git folder, or with the
-Databricks CLI from your laptop.
+collection **job**, an AI/BI **dashboard**, and two SQL **alerts**. Deploy it
+straight from a Databricks Git folder, or with the Databricks CLI from your
+laptop.
 
 ---
 
@@ -18,7 +18,7 @@ Databricks CLI from your laptop.
 | **Complete discovery** | The Settings V2 metadata API (`list_*_settings_metadata()`) is self-describing, so **every** available setting is enumerated automatically — nothing is hardcoded. |
 | **Preview feature tracking** | Settings carry a `preview_phase` (`PRIVATE_PREVIEW`, `BETA`, `PUBLIC_PREVIEW`, …). Previews are surfaced automatically with a dedicated enabled/disabled heatmap. |
 | **Schema evolution** | The Delta table is written with `mergeSchema=true`, so new metadata fields added by Databricks appear as new columns with no DDL changes. |
-| **Change detection** | Exact snapshot-to-snapshot comparison classifies every change as **value_changed**, **added**, or **removed** — so settings that appear or disappear from the Settings V2 API are caught too, not just value flips. Powers the Configuration Drift page and the alerts; a Lakehouse Monitoring **TimeSeries** profile runs in parallel for native profiling in the Databricks UI. |
+| **Change detection** | Exact snapshot-to-snapshot comparison classifies every change as **value_changed**, **added**, or **removed** — so settings that appear or disappear from the Settings V2 API are caught too, not just value flips. Pure SQL over `settings_history` powers both the Configuration Drift page and the alerts. |
 | **Alerting** | Two SQL alerts fire on config drift and newly enabled preview features, and list **exactly what changed** in the notification body. |
 | **Zero maintenance** | New settings/previews added by Databricks are captured on the next run; deprecated ones simply stop appearing. |
 
@@ -59,17 +59,18 @@ Changes per day cross-filtering a change-detail table, plus cross-workspace cons
                                      │  append with mergeSchema=true
                                      ▼
 ┌───────────────────────────────────────────────────────────────────────────┐
-│  Delta: <catalog>.<schema>.settings_history   (CDF on, schema-evolving)    │
+│  Delta: <catalog>.<schema>.settings_history   (schema-evolving)            │
 │    collected_at │ scope │ workspace │ setting_name │ setting_value │ …      │
 │  Views: settings_latest · workspace_comparison · preview_heatmap           │
-└───────────────┬───────────────────────────────────────┬───────────────────┘
-                │ direct LAG() value comparison          │ Lakehouse Monitoring
-                ▼                                         ▼   (TimeSeries, parallel)
-┌───────────────────────────────────────────┐   ┌───────────────────────────┐
-│  AI/BI Dashboard (3 pages) + 2 SQL Alerts  │   │ settings_history_*_metrics │
-│    Overview · Preview Heatmap              │   │ (native profiling / drift  │
-│    Config Drift          drift · new-prev  │   │  dashboards in the UI)     │
-└───────────────────────────────────────────┘   └───────────────────────────┘
+└───────────────────────────────────┬───────────────────────────────────────┘
+                                     │  exact snapshot-to-snapshot SQL
+                                     │  (value_changed / added / removed)
+                                     ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│  AI/BI Dashboard (3 pages)      +      2 SQL Alerts                         │
+│    Overview · Preview Heatmap          drift · new-preview                  │
+│    Config Drift                                                             │
+└───────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -96,8 +97,7 @@ databricks-config-insights/
 │       ├── __main__.py                 # Job entry point (`collect`)
 │       ├── collector.py                # Orchestration
 │       ├── discovery.py                # Dynamic Settings V2 discovery (no hardcoded keys)
-│       ├── writer.py                   # Schema-evolving Delta writer + views
-│       └── monitoring.py               # Lakehouse Monitoring setup
+│       └── writer.py                   # Schema-evolving Delta writer + views
 └── docs/
     └── images/                         # Dashboard screenshots
 ```
@@ -108,7 +108,7 @@ databricks-config-insights/
 
 | Requirement | Detail |
 |---|---|
-| Unity Catalog | For the Delta tables, views, and Lakehouse Monitoring. |
+| Unity Catalog | For the Delta tables and views. |
 | SQL warehouse | Serverless or Pro — used by the dashboard and alerts. |
 | Workspace admin | The job identity needs to read workspace settings. |
 | Account admin *(optional)* | Only required for cross-workspace scanning via an account ID. Without it the tool runs in **workspace-only** mode. |
@@ -154,7 +154,7 @@ databricks bundle deploy -t dev -p <profile> \
   --var="warehouse_id=<your-warehouse-id>" \
   --var="catalog=<your-catalog>"
 
-# Kick off the first collection (also creates the Lakehouse monitor)
+# Kick off the first collection (creates the tables and views)
 databricks bundle run config_collector -t dev -p <profile> \
   --var="warehouse_id=<your-warehouse-id>" \
   --var="catalog=<your-catalog>"
@@ -163,8 +163,8 @@ databricks bundle run config_collector -t dev -p <profile> \
 ### After the first run
 
 - Open the **Configuration Insights** dashboard in your workspace.
-- The Lakehouse **monitor** is created on `settings_history`; its drift metrics
-  populate a few minutes after the first two collection runs exist.
+- Drift (value_changed / added / removed) appears once **two** collection runs
+  exist, since each setting is compared to its previous snapshot.
 - The two SQL **alerts** evaluate daily and email the deploying user.
 
 ---
@@ -176,18 +176,17 @@ defaults in `databricks.yml`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `catalog` | `main` | Unity Catalog for the settings tables, views, and monitor output. |
+| `catalog` | `main` | Unity Catalog for the settings tables and views. |
 | `schema` | `config_insights` | Schema within the catalog. |
 | `warehouse_id` | *(required)* | SQL warehouse for the dashboard and alerts. |
 | `account_id` | `"none"` | Optional account ID for cross-workspace scanning (requires account admin). `none` (or empty) ⇒ workspace-only mode. Must be a non-empty string — Terraform rejects null job parameters. |
 
 **Single, harmonized storage location.** Everything the tool creates — the
 `settings_history` table, the `settings_latest` / `workspace_comparison` /
-`preview_heatmap` views, the dashboard datasets, the SQL alerts, **and** the
-Lakehouse Monitoring metric tables (`settings_history_profile_metrics`,
-`settings_history_drift_metrics`) — lives in the same **`${catalog}.${schema}`**.
-Change those two variables and the whole tool (job, dashboard, alerts, monitor)
-follows. Nothing is pinned to a hardcoded catalog or schema.
+`preview_heatmap` views, the dashboard datasets, and the SQL alerts — lives in
+the same **`${catalog}.${schema}`**. Change those two variables and the whole
+tool (job, dashboard, alerts) follows. Nothing is pinned to a hardcoded catalog
+or schema.
 
 ### Scheduling
 
@@ -196,7 +195,6 @@ Defaults are staggered so each stage runs after the previous one finishes:
 | Stage | Cron (UTC) |
 |---|---|
 | Collection job | `0 0 6 * * ?` (06:00) |
-| Monitor refresh | triggered after every job run (+ `0 30 6 * * ?` fallback) |
 | SQL alerts | `0 0 7 * * ?` (07:00) |
 
 Adjust the cron expressions in `resources/jobs/collector.job.yml` and
@@ -227,7 +225,7 @@ df.write.format("delta").mode("append").option("mergeSchema", "true").saveAsTabl
 If Databricks adds new metadata fields later (e.g. `deprecated_date`), they become
 new columns automatically — no migration required.
 
-### Change detection: exact value comparison + native monitoring
+### Change detection: exact per-setting comparison
 
 Drift shown on the dashboard and evaluated by the alerts is an **exact
 snapshot comparison**. Each setting is compared against its previous
@@ -240,21 +238,17 @@ observation and every change is classified as one of:
 
 To catch **added**/**removed** (not just value flips), the query builds a grid
 of *(setting × run)* and left-joins it to the actual observations, so a missing
-observation is a real signal rather than an invisible gap. This needs no
-statistical drift metrics and no run-timestamp alignment, and it lets the alert
-report exactly which settings changed and how.
+observation is a real signal rather than an invisible gap. It needs no
+run-timestamp alignment, and it lets the alert report exactly which settings
+changed and how.
 
-In parallel, a Lakehouse Monitoring **TimeSeries** profile is created on the same
-table for native, out-of-the-box profiling and drift dashboards in the Databricks
-UI (sliced by scope/category/workspace):
-
-```python
-ws_client.quality_monitors.create(
-    table_name=f"{catalog}.{schema}.settings_history",
-    time_series=MonitorTimeSeries(timestamp_col="collected_at", granularities=["1 day"]),
-    slicing_exprs=["scope", "category", "workspace_name"],
-)
-```
+> **Why not Lakehouse Monitoring?** It was evaluated and deliberately **not**
+> used here. Lakehouse Monitoring computes *statistical distribution drift* over
+> a column within time windows (JS-divergence, KS test, PSI, …) sliced by
+> dimensions — great for ML features and data-quality, but it cannot identify
+> *which* setting changed, and its day-window bucketing conflates multiple runs
+> on the same date. Configuration drift is a per-key, exact before/after
+> problem, which the SQL above solves directly, more cheaply, and more clearly.
 
 ---
 

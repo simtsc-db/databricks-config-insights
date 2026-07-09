@@ -17,7 +17,7 @@ artifacts:
 
 variables:
   catalog:
-    description: Unity Catalog that stores the settings tables, views and monitor output.
+    description: Unity Catalog that stores the settings tables and views.
     default: main
   schema:
     description: Schema within the catalog for the settings tables and views.

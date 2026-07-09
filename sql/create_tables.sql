@@ -4,18 +4,19 @@
 --   <catalog>.<schema>   (DAB variables `catalog` + `schema`; defaults main.config_insights)
 -- Replace `main.config_insights` below with your own catalog.schema if different.
 -- Tables use schema evolution: new fields from the API are added automatically.
--- Drift detection is handled by Lakehouse Monitoring (no custom drift table needed).
+-- Drift detection is done by the dashboard and SQL alerts via exact
+-- snapshot-to-snapshot comparison of this table (no separate drift table needed).
 
 -- The catalog must already exist; the job creates the schema.
 CREATE SCHEMA IF NOT EXISTS main.config_insights;
 
--- Primary settings history table (append-only, TimeSeries layout)
+-- Primary settings history table (append-only snapshot log)
 -- Each collection run appends a full snapshot of all discovered settings.
 -- Schema evolution (mergeSchema=true) adds new columns automatically if
 -- the Settings V2 API returns new metadata fields in future.
 CREATE TABLE IF NOT EXISTS main.config_insights.settings_history (
     collected_at TIMESTAMP NOT NULL
-        COMMENT 'Timestamp of this collection run (TimeSeries key for Lakehouse Monitoring)',
+        COMMENT 'Timestamp of this collection run (snapshot key for drift comparison)',
     account_id STRING NOT NULL
         COMMENT 'Databricks account ID',
     scope STRING NOT NULL
@@ -142,15 +143,9 @@ WHERE s.preview_phase IS NOT NULL
   AND s.scope = 'workspace'
 ORDER BY s.setting_name, s.workspace_name;
 
--- Note: Drift detection is handled by Lakehouse Monitoring (TimeSeries profile).
--- After the monitor is created, drift metrics are automatically written to:
---   main.config_insights.settings_history_drift_metrics
--- Profile metrics are written to:
---   main.config_insights.settings_history_profile_metrics
--- These tables are auto-generated and maintained by the platform.
---
--- WHY TimeSeries (not Snapshot):
--- - Our table is append-only with collected_at as the time axis
--- - TimeSeries computes CONSECUTIVE drift (today vs yesterday)
--- - TimeSeries supports incremental processing via CDF
--- - Snapshot reprocesses the full table each refresh and only supports baseline drift
+-- Note: Drift detection is done entirely in SQL by the dashboard's
+-- Configuration Drift page and the `drift_detected` alert. They compare each
+-- setting to its previous snapshot and classify changes as value_changed /
+-- added / removed. No Lakehouse Monitoring / drift-metrics tables are used:
+-- statistical distribution drift over a column is the wrong tool for exact,
+-- per-setting configuration change tracking.
