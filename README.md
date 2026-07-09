@@ -18,7 +18,7 @@ Databricks CLI from your laptop.
 | **Complete discovery** | The Settings V2 metadata API (`list_*_settings_metadata()`) is self-describing, so **every** available setting is enumerated automatically — nothing is hardcoded. |
 | **Preview feature tracking** | Settings carry a `preview_phase` (`PRIVATE_PREVIEW`, `BETA`, `PUBLIC_PREVIEW`, …). Previews are surfaced automatically with a dedicated enabled/disabled heatmap. |
 | **Schema evolution** | The Delta table is written with `mergeSchema=true`, so new metadata fields added by Databricks appear as new columns with no DDL changes. |
-| **Change detection** | An exact value-change comparison — a `LAG()` window over `settings_history` — powers the Configuration Drift dashboard page and the alerts. A Lakehouse Monitoring **TimeSeries** profile runs in parallel for native profiling/drift in the Databricks UI. |
+| **Change detection** | Exact snapshot-to-snapshot comparison classifies every change as **value_changed**, **added**, or **removed** — so settings that appear or disappear from the Settings V2 API are caught too, not just value flips. Powers the Configuration Drift page and the alerts; a Lakehouse Monitoring **TimeSeries** profile runs in parallel for native profiling in the Databricks UI. |
 | **Alerting** | Two SQL alerts fire on config drift and newly enabled preview features, and list **exactly what changed** in the notification body. |
 | **Zero maintenance** | New settings/previews added by Databricks are captured on the next run; deprecated ones simply stop appearing. |
 
@@ -230,15 +230,19 @@ new columns automatically — no migration required.
 ### Change detection: exact value comparison + native monitoring
 
 Drift shown on the dashboard and evaluated by the alerts is an **exact
-value-change** comparison — a `LAG()` window over `settings_history` compares
-each setting to its own previous observation. This needs no statistical drift
-metrics and no run-timestamp alignment, and it lets the alert report exactly
-which settings flipped:
+snapshot comparison**. Each setting is compared against its previous
+observation and every change is classified as one of:
 
-```sql
-LAG(setting_value) OVER (
-  PARTITION BY setting_name, COALESCE(workspace_id, 0) ORDER BY collected_at)
-```
+- **value_changed** — the setting exists in both runs but its value differs,
+- **added** — the setting is present now but was absent in the prior run,
+- **removed** — the setting was present before but the Settings V2 API no
+  longer returns it (e.g. deprecated/renamed).
+
+To catch **added**/**removed** (not just value flips), the query builds a grid
+of *(setting × run)* and left-joins it to the actual observations, so a missing
+observation is a real signal rather than an invisible gap. This needs no
+statistical drift metrics and no run-timestamp alignment, and it lets the alert
+report exactly which settings changed and how.
 
 In parallel, a Lakehouse Monitoring **TimeSeries** profile is created on the same
 table for native, out-of-the-box profiling and drift dashboards in the Databricks

@@ -43,7 +43,7 @@
     {
       "name": "config_drift_ds",
       "displayName": "Configuration Drift",
-      "query": "WITH ordered AS (SELECT setting_name, workspace_name, workspace_id, category, setting_value, collected_at, LAG(setting_value) OVER (PARTITION BY setting_name, COALESCE(workspace_id, 0) ORDER BY collected_at) AS previous_value, LAG(collected_at) OVER (PARTITION BY setting_name, COALESCE(workspace_id, 0) ORDER BY collected_at) AS previous_collected_at FROM settings_history) SELECT DATE(collected_at) AS change_date, setting_name, workspace_name, category, previous_value, setting_value AS new_value, collected_at AS detected_at FROM ordered WHERE previous_value IS NOT NULL AND setting_value != previous_value ORDER BY collected_at DESC"
+      "query": "WITH runs AS (SELECT collected_at, DENSE_RANK() OVER (ORDER BY collected_at) AS seq FROM (SELECT DISTINCT collected_at FROM settings_history)), keys AS (SELECT DISTINCT setting_name, COALESCE(workspace_id,0) AS ws FROM settings_history), grid AS (SELECT k.setting_name, k.ws, r.collected_at, r.seq FROM keys k CROSS JOIN runs r), obs AS (SELECT setting_name, COALESCE(workspace_id,0) AS ws, collected_at, MAX(setting_value) AS setting_value, MAX(workspace_name) AS workspace_name, MAX(category) AS category FROM settings_history GROUP BY setting_name, COALESCE(workspace_id,0), collected_at), matrix AS (SELECT g.setting_name, g.ws, g.collected_at, g.seq, o.setting_value, o.workspace_name, o.category FROM grid g LEFT JOIN obs o ON g.setting_name=o.setting_name AND g.ws=o.ws AND g.collected_at=o.collected_at), lagged AS (SELECT setting_name, ws, collected_at, seq, setting_value, workspace_name, category, LAG(setting_value) OVER (PARTITION BY setting_name, ws ORDER BY seq) AS prev_value, LAG(workspace_name) OVER (PARTITION BY setting_name, ws ORDER BY seq) AS prev_ws_name, LAG(category) OVER (PARTITION BY setting_name, ws ORDER BY seq) AS prev_category FROM matrix) SELECT DATE(collected_at) AS change_date, setting_name, COALESCE(workspace_name, prev_ws_name) AS workspace_name, COALESCE(category, prev_category) AS category, CASE WHEN prev_value IS NULL AND setting_value IS NOT NULL THEN 'added' WHEN prev_value IS NOT NULL AND setting_value IS NULL THEN 'removed' ELSE 'value_changed' END AS change_type, prev_value AS previous_value, setting_value AS new_value, collected_at AS detected_at FROM lagged WHERE seq > 1 AND ((prev_value IS NULL AND setting_value IS NOT NULL) OR (prev_value IS NOT NULL AND setting_value IS NULL) OR (prev_value IS NOT NULL AND setting_value IS NOT NULL AND setting_value <> prev_value)) ORDER BY collected_at DESC"
     },
     {
       "name": "inconsistencies_ds",
@@ -339,7 +339,7 @@
         {
           "widget": {
             "name": "drift-description",
-            "multilineTextboxSpec": {"lines": ["Tracks setting value changes between collection runs. Click a bar to filter the table below. Note: the Settings API does not expose who made the change; check the audit log for attribution."]}
+            "multilineTextboxSpec": {"lines": ["Tracks configuration drift between collection runs: settings whose value changed, plus settings that were added or removed (see the Change column). Click a bar to filter the table below. Note: the Settings API does not expose who made the change; check the audit log for attribution."]}
           },
           "position": {"x": 0, "y": 1, "width": 12, "height": 1}
         },
@@ -379,6 +379,7 @@
                 "fields": [
                   {"name": "change_date", "expression": "`change_date`"},
                   {"name": "setting_name", "expression": "`setting_name`"},
+                  {"name": "change_type", "expression": "`change_type`"},
                   {"name": "workspace_name", "expression": "`workspace_name`"},
                   {"name": "category", "expression": "`category`"},
                   {"name": "previous_value", "expression": "`previous_value`"},
@@ -395,6 +396,7 @@
                 "columns": [
                   {"fieldName": "change_date", "displayName": "Date"},
                   {"fieldName": "setting_name", "displayName": "Setting"},
+                  {"fieldName": "change_type", "displayName": "Change"},
                   {"fieldName": "workspace_name", "displayName": "Workspace"},
                   {"fieldName": "category", "displayName": "Category"},
                   {"fieldName": "previous_value", "displayName": "Previous Value"},
