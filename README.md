@@ -18,8 +18,8 @@ Databricks CLI from your laptop.
 | **Complete discovery** | The Settings V2 metadata API (`list_*_settings_metadata()`) is self-describing, so **every** available setting is enumerated automatically — nothing is hardcoded. |
 | **Preview feature tracking** | Settings carry a `preview_phase` (`PRIVATE_PREVIEW`, `BETA`, `PUBLIC_PREVIEW`, …). Previews are surfaced automatically with a dedicated enabled/disabled heatmap. |
 | **Schema evolution** | The Delta table is written with `mergeSchema=true`, so new metadata fields added by Databricks appear as new columns with no DDL changes. |
-| **Platform-native drift** | A Lakehouse Monitoring **TimeSeries** profile computes drift metrics daily — no handcrafted comparison SQL. |
-| **Alerting** | Two SQL alerts fire on config drift and newly enabled preview features. |
+| **Change detection** | An exact value-change comparison — a `LAG()` window over `settings_history` — powers the Configuration Drift dashboard page and the alerts. A Lakehouse Monitoring **TimeSeries** profile runs in parallel for native profiling/drift in the Databricks UI. |
+| **Alerting** | Two SQL alerts fire on config drift and newly enabled preview features, and list **exactly what changed** in the notification body. |
 | **Zero maintenance** | New settings/previews added by Databricks are captured on the next run; deprecated ones simply stop appearing. |
 
 ---
@@ -62,19 +62,14 @@ Changes per day cross-filtering a change-detail table, plus cross-workspace cons
 │  Delta: <catalog>.<schema>.settings_history   (CDF on, schema-evolving)    │
 │    collected_at │ scope │ workspace │ setting_name │ setting_value │ …      │
 │  Views: settings_latest · workspace_comparison · preview_heatmap           │
-└───────────────────────────────────┬───────────────────────────────────────┘
-                                     │  Lakehouse Monitoring (TimeSeries)
-                                     ▼
-┌───────────────────────────────────────────────────────────────────────────┐
-│  Auto-generated:  settings_history_profile_metrics                         │
-│                   settings_history_drift_metrics                           │
-└───────────────────────────────────┬───────────────────────────────────────┘
-                                     ▼
-┌───────────────────────────────────────────────────────────────────────────┐
-│  AI/BI Dashboard (3 pages)      +      2 SQL Alerts                         │
-│    Overview · Preview Heatmap          drift · new-preview                  │
-│    Config Drift                                                             │
-└───────────────────────────────────────────────────────────────────────────┘
+└───────────────┬───────────────────────────────────────┬───────────────────┘
+                │ direct LAG() value comparison          │ Lakehouse Monitoring
+                ▼                                         ▼   (TimeSeries, parallel)
+┌───────────────────────────────────────────┐   ┌───────────────────────────┐
+│  AI/BI Dashboard (3 pages) + 2 SQL Alerts  │   │ settings_history_*_metrics │
+│    Overview · Preview Heatmap              │   │ (native profiling / drift  │
+│    Config Drift          drift · new-prev  │   │  dashboards in the UI)     │
+└───────────────────────────────────────────┘   └───────────────────────────┘
 ```
 
 ---
@@ -91,7 +86,7 @@ databricks-config-insights/
 │   │   └── collector.job.yml           # Scheduled collection job (serverless)
 │   ├── dashboards/
 │   │   ├── config_insights.dashboard.yml   # AI/BI dashboard resource
-│   │   └── config_insights.lvdash.json     # Dashboard definition (4 pages)
+│   │   └── config_insights.lvdash.json     # Dashboard definition (3 pages)
 │   └── alerts/
 │       └── config_alerts.yml           # 2 SQL alerts (drift, new preview)
 ├── sql/
@@ -184,7 +179,7 @@ defaults in `databricks.yml`.
 | `catalog` | `main` | Unity Catalog for the settings tables, views, and monitor output. |
 | `schema` | `config_insights` | Schema within the catalog. |
 | `warehouse_id` | *(required)* | SQL warehouse for the dashboard and alerts. |
-| `account_id` | `""` (empty) | Optional account ID for cross-workspace scanning (requires account admin). Empty ⇒ workspace-only mode. |
+| `account_id` | `"none"` | Optional account ID for cross-workspace scanning (requires account admin). `none` (or empty) ⇒ workspace-only mode. Must be a non-empty string — Terraform rejects null job parameters. |
 
 **Single, harmonized storage location.** Everything the tool creates — the
 `settings_history` table, the `settings_latest` / `workspace_comparison` /
@@ -232,7 +227,22 @@ df.write.format("delta").mode("append").option("mergeSchema", "true").saveAsTabl
 If Databricks adds new metadata fields later (e.g. `deprecated_date`), they become
 new columns automatically — no migration required.
 
-### Lakehouse Monitoring instead of custom drift SQL
+### Change detection: exact value comparison + native monitoring
+
+Drift shown on the dashboard and evaluated by the alerts is an **exact
+value-change** comparison — a `LAG()` window over `settings_history` compares
+each setting to its own previous observation. This needs no statistical drift
+metrics and no run-timestamp alignment, and it lets the alert report exactly
+which settings flipped:
+
+```sql
+LAG(setting_value) OVER (
+  PARTITION BY setting_name, COALESCE(workspace_id, 0) ORDER BY collected_at)
+```
+
+In parallel, a Lakehouse Monitoring **TimeSeries** profile is created on the same
+table for native, out-of-the-box profiling and drift dashboards in the Databricks
+UI (sliced by scope/category/workspace):
 
 ```python
 ws_client.quality_monitors.create(
@@ -241,9 +251,6 @@ ws_client.quality_monitors.create(
     slicing_exprs=["scope", "category", "workspace_name"],
 )
 ```
-
-This yields statistical drift metrics (per day, sliced by scope/category/workspace)
-that feed both the dashboard's Configuration Drift page and the drift SQL alert.
 
 ---
 
@@ -267,4 +274,4 @@ mode — still fully functional for the current workspace.
 | `Falling back to workspace-only mode` | The job identity is not an account admin. Expected unless you configured account-level scanning. |
 | Dashboard widgets show *no data* | Run the collector at least once; drift needs **two** runs before metrics appear. |
 | `Metastore storage root URL does not exist` on `CREATE CATALOG` | Point `catalog` at an existing catalog — the job uses `USE CATALOG` + `CREATE SCHEMA`, it does not create catalogs. |
-| Alert query errors on `*_drift_metrics` | The monitor's metric tables are created on first monitor refresh; let one collection cycle complete. |
+| Alerts always report 0 / never trigger | Drift and new-preview detection compares each setting to its **previous** observation, so at least **two** collection runs must exist before anything can fire. |
