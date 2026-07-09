@@ -242,14 +242,6 @@ observation is a real signal rather than an invisible gap. It needs no
 run-timestamp alignment, and it lets the alert report exactly which settings
 changed and how.
 
-> **Why not Lakehouse Monitoring?** It was evaluated and deliberately **not**
-> used here. Lakehouse Monitoring computes *statistical distribution drift* over
-> a column within time windows (JS-divergence, KS test, PSI, …) sliced by
-> dimensions — great for ML features and data-quality, but it cannot identify
-> *which* setting changed, and its day-window bucketing conflates multiple runs
-> on the same date. Configuration drift is a per-key, exact before/after
-> problem, which the SQL above solves directly, more cheaply, and more clearly.
-
 ---
 
 ## Multi-workspace (account-level) scanning
