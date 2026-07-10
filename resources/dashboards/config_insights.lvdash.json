@@ -32,13 +32,8 @@
     },
     {
       "name": "preview_heatmap_ds",
-      "displayName": "Preview Features Heatmap",
+      "displayName": "Preview Features",
       "query": "SELECT feature, description, preview_phase, workspace_name, status FROM preview_heatmap ORDER BY feature, workspace_name"
-    },
-    {
-      "name": "preview_by_workspace_ds",
-      "displayName": "Previews by Workspace",
-      "query": "SELECT workspace_name, preview_phase, status, COUNT(*) AS feature_count FROM preview_heatmap GROUP BY workspace_name, preview_phase, status ORDER BY feature_count DESC"
     },
     {
       "name": "config_drift_ds",
@@ -54,7 +49,7 @@
   "pages": [
     {
       "name": "overview",
-      "displayName": "Account Overview",
+      "displayName": "Overview & Previews",
       "pageType": "PAGE_TYPE_CANVAS",
       "layoutVersion": "GRID_V1",
       "layout": [
@@ -212,28 +207,72 @@
             }
           },
           "position": {"x": 0, "y": 9, "width": 12, "height": 5}
-        }
-      ]
-    },
-    {
-      "name": "heatmap",
-      "displayName": "Preview Features Heatmap",
-      "pageType": "PAGE_TYPE_CANVAS",
-      "layoutVersion": "GRID_V1",
-      "layout": [
-        {
-          "widget": {
-            "name": "heatmap-title",
-            "multilineTextboxSpec": {"lines": ["## Preview Features Heatmap"]}
-          },
-          "position": {"x": 0, "y": 0, "width": 12, "height": 1}
         },
         {
           "widget": {
-            "name": "heatmap-description",
-            "multilineTextboxSpec": {"lines": ["Shows all preview features and their status (ENABLED/DISABLED) per workspace. Use the table to identify which previews are active and which are not yet turned on."]}
+            "name": "preview-section-title",
+            "multilineTextboxSpec": {"lines": ["## Preview Features"]}
           },
-          "position": {"x": 0, "y": 1, "width": 12, "height": 1}
+          "position": {"x": 0, "y": 14, "width": 12, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "preview-description",
+            "multilineTextboxSpec": {"lines": ["Preview features and their status (ENABLED / DISABLED) per workspace. Click a bar (by status or phase) to cross-filter the table below."]}
+          },
+          "position": {"x": 0, "y": 15, "width": 12, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "preview-status-bar",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "preview_heatmap_ds",
+                "fields": [
+                  {"name": "status", "expression": "`status`"},
+                  {"name": "count(feature)", "expression": "COUNT(`feature`)"}
+                ],
+                "disaggregated": false
+              }
+            }],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {"fieldName": "status", "scale": {"type": "categorical"}, "displayName": "Status"},
+                "y": {"fieldName": "count(feature)", "scale": {"type": "quantitative"}, "displayName": "Feature Count"}
+              },
+              "frame": {"showTitle": true, "title": "Preview Features by Status"}
+            }
+          },
+          "position": {"x": 0, "y": 16, "width": 6, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "preview-phase-bar",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "preview_heatmap_ds",
+                "fields": [
+                  {"name": "preview_phase", "expression": "`preview_phase`"},
+                  {"name": "count(feature)", "expression": "COUNT(`feature`)"}
+                ],
+                "disaggregated": false
+              }
+            }],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {"fieldName": "preview_phase", "scale": {"type": "categorical"}, "displayName": "Phase"},
+                "y": {"fieldName": "count(feature)", "scale": {"type": "quantitative"}, "displayName": "Feature Count"}
+              },
+              "frame": {"showTitle": true, "title": "Preview Features by Phase"}
+            }
+          },
+          "position": {"x": 6, "y": 16, "width": 6, "height": 5}
         },
         {
           "widget": {
@@ -267,59 +306,7 @@
               "frame": {"showTitle": true, "title": "Preview Features by Workspace"}
             }
           },
-          "position": {"x": 0, "y": 2, "width": 12, "height": 8}
-        },
-        {
-          "widget": {
-            "name": "preview-status-bar",
-            "queries": [{
-              "name": "main_query",
-              "query": {
-                "datasetName": "preview_heatmap_ds",
-                "fields": [
-                  {"name": "status", "expression": "`status`"},
-                  {"name": "count(feature)", "expression": "COUNT(`feature`)"}
-                ],
-                "disaggregated": false
-              }
-            }],
-            "spec": {
-              "version": 3,
-              "widgetType": "bar",
-              "encodings": {
-                "x": {"fieldName": "status", "scale": {"type": "categorical"}, "displayName": "Status"},
-                "y": {"fieldName": "count(feature)", "scale": {"type": "quantitative"}, "displayName": "Feature Count"}
-              },
-              "frame": {"showTitle": true, "title": "Preview Features by Status"}
-            }
-          },
-          "position": {"x": 0, "y": 10, "width": 6, "height": 5}
-        },
-        {
-          "widget": {
-            "name": "preview-phase-bar",
-            "queries": [{
-              "name": "main_query",
-              "query": {
-                "datasetName": "preview_heatmap_ds",
-                "fields": [
-                  {"name": "preview_phase", "expression": "`preview_phase`"},
-                  {"name": "count(feature)", "expression": "COUNT(`feature`)"}
-                ],
-                "disaggregated": false
-              }
-            }],
-            "spec": {
-              "version": 3,
-              "widgetType": "bar",
-              "encodings": {
-                "x": {"fieldName": "preview_phase", "scale": {"type": "categorical"}, "displayName": "Phase"},
-                "y": {"fieldName": "count(feature)", "scale": {"type": "quantitative"}, "displayName": "Feature Count"}
-              },
-              "frame": {"showTitle": true, "title": "Preview Features by Phase"}
-            }
-          },
-          "position": {"x": 6, "y": 10, "width": 6, "height": 5}
+          "position": {"x": 0, "y": 21, "width": 12, "height": 8}
         }
       ]
     },

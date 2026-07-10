@@ -30,20 +30,17 @@ laptop.
 > own workspace, open the deployed **Configuration Insights** dashboard and export
 > each page (see [`docs/images/README.md`](docs/images/README.md)).
 
-### Account Overview
-Totals, category/scope breakdowns, and collection history.
+### Overview & Previews
+Totals, category/scope breakdowns, collection history, and the preview-feature
+section: status/phase bars that **cross-filter** the enabled/disabled table.
 
-![Account Overview](docs/images/01-account-overview.png)
-
-### Preview Features Heatmap
-Which previews are **enabled** vs **disabled**, by workspace and preview phase.
-
-![Preview Features Heatmap](docs/images/02-preview-heatmap.png)
+![Overview & Previews](docs/images/01-overview.png)
 
 ### Configuration Drift
-Changes per day cross-filtering a change-detail table, plus cross-workspace consistency.
+Changes per day cross-filtering a change-detail table (value_changed / added /
+removed), plus cross-workspace consistency.
 
-![Configuration Drift](docs/images/03-configuration-drift.png)
+![Configuration Drift](docs/images/02-configuration-drift.png)
 
 ---
 
@@ -67,8 +64,8 @@ Changes per day cross-filtering a change-detail table, plus cross-workspace cons
                                      │  (value_changed / added / removed)
                                      ▼
 ┌───────────────────────────────────────────────────────────────────────────┐
-│  AI/BI Dashboard (3 pages)      +      2 SQL Alerts                         │
-│    Overview · Preview Heatmap          drift · new-preview                  │
+│  AI/BI Dashboard (2 pages)      +      2 SQL Alerts                         │
+│    Overview & Previews                 drift · new-preview                  │
 │    Config Drift                                                             │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
@@ -87,7 +84,7 @@ databricks-config-insights/
 │   │   └── collector.job.yml           # Scheduled collection job (serverless)
 │   ├── dashboards/
 │   │   ├── config_insights.dashboard.yml   # AI/BI dashboard resource
-│   │   └── config_insights.lvdash.json     # Dashboard definition (3 pages)
+│   │   └── config_insights.lvdash.json     # Dashboard definition (2 pages)
 │   └── alerts/
 │       └── config_alerts.yml           # 2 SQL alerts (drift, new preview)
 ├── sql/
