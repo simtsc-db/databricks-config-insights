@@ -1,29 +1,9 @@
 {
   "datasets": [
     {
-      "name": "total_settings_ds",
-      "displayName": "Total Settings",
-      "query": "SELECT COUNT(DISTINCT setting_name) AS total_settings FROM settings_latest"
-    },
-    {
-      "name": "workspace_count_ds",
-      "displayName": "Workspace Count",
-      "query": "SELECT COUNT(DISTINCT workspace_id) AS workspace_count FROM settings_latest WHERE scope = 'workspace'"
-    },
-    {
-      "name": "preview_count_ds",
-      "displayName": "Preview Count",
-      "query": "SELECT COUNT(DISTINCT feature) AS preview_count FROM preview_heatmap"
-    },
-    {
-      "name": "category_breakdown_ds",
-      "displayName": "Category Breakdown",
-      "query": "SELECT category, COUNT(DISTINCT setting_name) AS setting_count FROM settings_latest GROUP BY category ORDER BY setting_count DESC"
-    },
-    {
-      "name": "scope_breakdown_ds",
-      "displayName": "Scope Breakdown",
-      "query": "SELECT scope, COUNT(*) AS setting_count FROM settings_latest GROUP BY scope"
+      "name": "settings_rows_ds",
+      "displayName": "Settings (row level)",
+      "query": "SELECT scope, category, setting_name, workspace_id, workspace_name FROM settings_latest"
     },
     {
       "name": "collection_history_ds",
@@ -62,13 +42,54 @@
         },
         {
           "widget": {
+            "name": "workspace-filter",
+            "queries": [
+              {
+                "name": "ws_settings",
+                "query": {
+                  "datasetName": "settings_rows_ds",
+                  "fields": [
+                    {"name": "workspace_name", "expression": "`workspace_name`"},
+                    {"name": "workspace_name_associativity", "expression": "COUNT_IF(`associative_filter_context_pass_through`)"}
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "ws_heatmap",
+                "query": {
+                  "datasetName": "preview_heatmap_ds",
+                  "fields": [
+                    {"name": "workspace_name", "expression": "`workspace_name`"},
+                    {"name": "workspace_name_associativity", "expression": "COUNT_IF(`associative_filter_context_pass_through`)"}
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-single-select",
+              "encodings": {
+                "fields": [
+                  {"fieldName": "workspace_name", "displayName": "Workspace", "queryName": "ws_settings"},
+                  {"fieldName": "workspace_name", "displayName": "Workspace", "queryName": "ws_heatmap"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Workspace"}
+            }
+          },
+          "position": {"x": 0, "y": 1, "width": 4, "height": 1}
+        },
+        {
+          "widget": {
             "name": "total-settings",
             "queries": [{
               "name": "main_query",
               "query": {
-                "datasetName": "total_settings_ds",
-                "fields": [{"name": "total_settings", "expression": "`total_settings`"}],
-                "disaggregated": true
+                "datasetName": "settings_rows_ds",
+                "fields": [{"name": "total_settings", "expression": "COUNT(DISTINCT `setting_name`)"}],
+                "disaggregated": false
               }
             }],
             "spec": {
@@ -80,7 +101,7 @@
               "frame": {"showTitle": true, "title": "Settings Discovered"}
             }
           },
-          "position": {"x": 0, "y": 1, "width": 4, "height": 3}
+          "position": {"x": 0, "y": 2, "width": 4, "height": 3}
         },
         {
           "widget": {
@@ -88,9 +109,9 @@
             "queries": [{
               "name": "main_query",
               "query": {
-                "datasetName": "workspace_count_ds",
-                "fields": [{"name": "workspace_count", "expression": "`workspace_count`"}],
-                "disaggregated": true
+                "datasetName": "settings_rows_ds",
+                "fields": [{"name": "workspace_count", "expression": "COUNT(DISTINCT CASE WHEN `scope` = 'workspace' THEN `workspace_id` END)"}],
+                "disaggregated": false
               }
             }],
             "spec": {
@@ -102,7 +123,7 @@
               "frame": {"showTitle": true, "title": "Workspaces Scanned"}
             }
           },
-          "position": {"x": 4, "y": 1, "width": 4, "height": 3}
+          "position": {"x": 4, "y": 2, "width": 4, "height": 3}
         },
         {
           "widget": {
@@ -110,9 +131,9 @@
             "queries": [{
               "name": "main_query",
               "query": {
-                "datasetName": "preview_count_ds",
-                "fields": [{"name": "preview_count", "expression": "`preview_count`"}],
-                "disaggregated": true
+                "datasetName": "preview_heatmap_ds",
+                "fields": [{"name": "preview_count", "expression": "COUNT(DISTINCT `feature`)"}],
+                "disaggregated": false
               }
             }],
             "spec": {
@@ -124,7 +145,7 @@
               "frame": {"showTitle": true, "title": "Preview Features"}
             }
           },
-          "position": {"x": 8, "y": 1, "width": 4, "height": 3}
+          "position": {"x": 8, "y": 2, "width": 4, "height": 3}
         },
         {
           "widget": {
@@ -132,12 +153,12 @@
             "queries": [{
               "name": "main_query",
               "query": {
-                "datasetName": "category_breakdown_ds",
+                "datasetName": "settings_rows_ds",
                 "fields": [
                   {"name": "category", "expression": "`category`"},
-                  {"name": "setting_count", "expression": "`setting_count`"}
+                  {"name": "setting_count", "expression": "COUNT(DISTINCT `setting_name`)"}
                 ],
-                "disaggregated": true
+                "disaggregated": false
               }
             }],
             "spec": {
@@ -150,7 +171,7 @@
               "frame": {"showTitle": true, "title": "Settings by Category"}
             }
           },
-          "position": {"x": 0, "y": 4, "width": 6, "height": 5}
+          "position": {"x": 0, "y": 5, "width": 6, "height": 5}
         },
         {
           "widget": {
@@ -158,12 +179,12 @@
             "queries": [{
               "name": "main_query",
               "query": {
-                "datasetName": "scope_breakdown_ds",
+                "datasetName": "settings_rows_ds",
                 "fields": [
                   {"name": "scope", "expression": "`scope`"},
-                  {"name": "setting_count", "expression": "`setting_count`"}
+                  {"name": "setting_count", "expression": "COUNT(`setting_name`)"}
                 ],
-                "disaggregated": true
+                "disaggregated": false
               }
             }],
             "spec": {
@@ -176,7 +197,7 @@
               "frame": {"showTitle": true, "title": "Settings by Scope"}
             }
           },
-          "position": {"x": 6, "y": 4, "width": 6, "height": 5}
+          "position": {"x": 6, "y": 5, "width": 6, "height": 5}
         },
         {
           "widget": {
@@ -206,21 +227,21 @@
               "frame": {"showTitle": true, "title": "Collection History"}
             }
           },
-          "position": {"x": 0, "y": 9, "width": 12, "height": 5}
+          "position": {"x": 0, "y": 10, "width": 12, "height": 5}
         },
         {
           "widget": {
             "name": "preview-section-title",
             "multilineTextboxSpec": {"lines": ["## Preview Features"]}
           },
-          "position": {"x": 0, "y": 14, "width": 12, "height": 1}
+          "position": {"x": 0, "y": 15, "width": 12, "height": 1}
         },
         {
           "widget": {
             "name": "preview-description",
-            "multilineTextboxSpec": {"lines": ["Preview features and their status (ENABLED / DISABLED) per workspace. Click a bar (by status or phase) to cross-filter the table below."]}
+            "multilineTextboxSpec": {"lines": ["Preview features and their status (ENABLED / DISABLED) per workspace. Use the Workspace filter above, or click a bar (by status or phase) to cross-filter the other preview widgets."]}
           },
-          "position": {"x": 0, "y": 15, "width": 12, "height": 1}
+          "position": {"x": 0, "y": 16, "width": 12, "height": 1}
         },
         {
           "widget": {
@@ -246,7 +267,7 @@
               "frame": {"showTitle": true, "title": "Preview Features by Status"}
             }
           },
-          "position": {"x": 0, "y": 16, "width": 6, "height": 5}
+          "position": {"x": 0, "y": 17, "width": 6, "height": 5}
         },
         {
           "widget": {
@@ -272,7 +293,7 @@
               "frame": {"showTitle": true, "title": "Preview Features by Phase"}
             }
           },
-          "position": {"x": 6, "y": 16, "width": 6, "height": 5}
+          "position": {"x": 6, "y": 17, "width": 6, "height": 5}
         },
         {
           "widget": {
@@ -306,7 +327,7 @@
               "frame": {"showTitle": true, "title": "Preview Features by Workspace"}
             }
           },
-          "position": {"x": 0, "y": 21, "width": 12, "height": 8}
+          "position": {"x": 0, "y": 22, "width": 12, "height": 8}
         }
       ]
     },
@@ -326,9 +347,36 @@
         {
           "widget": {
             "name": "drift-description",
-            "multilineTextboxSpec": {"lines": ["Tracks configuration drift between collection runs: settings whose value changed, plus settings that were added or removed (see the Change column). Click a bar to filter the table below. Note: the Settings API does not expose who made the change; check the audit log for attribution."]}
+            "multilineTextboxSpec": {"lines": ["Tracks configuration drift between collection runs: settings whose value changed, plus settings that were added or removed (see the Change column). Use the Workspace filter, or click a bar to cross-filter the table below. Note: the Settings API does not expose who made the change; check the audit log for attribution."]}
           },
           "position": {"x": 0, "y": 1, "width": 12, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "drift-workspace-filter",
+            "queries": [{
+              "name": "ws_drift",
+              "query": {
+                "datasetName": "config_drift_ds",
+                "fields": [
+                  {"name": "workspace_name", "expression": "`workspace_name`"},
+                  {"name": "workspace_name_associativity", "expression": "COUNT_IF(`associative_filter_context_pass_through`)"}
+                ],
+                "disaggregated": false
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-single-select",
+              "encodings": {
+                "fields": [
+                  {"fieldName": "workspace_name", "displayName": "Workspace", "queryName": "ws_drift"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Workspace"}
+            }
+          },
+          "position": {"x": 0, "y": 2, "width": 4, "height": 1}
         },
         {
           "widget": {
@@ -354,7 +402,7 @@
               "frame": {"showTitle": true, "title": "Configuration Changes per Day"}
             }
           },
-          "position": {"x": 0, "y": 2, "width": 12, "height": 5}
+          "position": {"x": 0, "y": 3, "width": 12, "height": 5}
         },
         {
           "widget": {
@@ -394,7 +442,7 @@
               "frame": {"showTitle": true, "title": "Change Details"}
             }
           },
-          "position": {"x": 0, "y": 7, "width": 12, "height": 7}
+          "position": {"x": 0, "y": 8, "width": 12, "height": 7}
         },
         {
           "widget": {
@@ -430,7 +478,7 @@
               "frame": {"showTitle": true, "title": "Cross-Workspace Consistency"}
             }
           },
-          "position": {"x": 0, "y": 14, "width": 12, "height": 6}
+          "position": {"x": 0, "y": 15, "width": 12, "height": 6}
         }
       ]
     }
