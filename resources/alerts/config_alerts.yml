@@ -8,7 +8,10 @@ resources:
       # settings which appeared or disappeared are caught too, not just value
       # changes (the Settings V2 API can add/remove settings over time). The
       # `changed_settings` column lists exactly what changed for the
-      # notification. Always returns exactly one row.
+      # notification. Sentinel values (<unavailable> / <null> / <not-set>)
+      # mean the value could not be read reliably, so transitions to/from a
+      # sentinel are ignored (only real value changes, true adds, and true
+      # removes count). Always returns exactly one row.
       query_text: |
         WITH runs AS (
           SELECT collected_at,
@@ -52,14 +55,21 @@ resources:
           ), '; '), '') AS changed_settings
         FROM (
           SELECT setting_name, ws, prev_val, curr_val,
-                 CASE WHEN prev_val IS NULL AND curr_val IS NOT NULL THEN 'added'
-                      WHEN prev_val IS NOT NULL AND curr_val IS NULL THEN 'removed'
+                 CASE WHEN prev_val IS NULL AND curr_val IS NOT NULL
+                           AND curr_val NOT IN ('<unavailable>', '<null>', '<not-set>') THEN 'added'
+                      WHEN prev_val IS NOT NULL
+                           AND prev_val NOT IN ('<unavailable>', '<null>', '<not-set>')
+                           AND curr_val IS NULL THEN 'removed'
                       ELSE 'value_changed' END AS change_type
           FROM diff
           WHERE (SELECT COUNT(*) FROM runs WHERE rnk >= 2) > 0
-            AND ((prev_val IS NULL AND curr_val IS NOT NULL)
-              OR (prev_val IS NOT NULL AND curr_val IS NULL)
-              OR (prev_val IS NOT NULL AND curr_val IS NOT NULL AND curr_val <> prev_val))
+            AND ((prev_val IS NOT NULL AND prev_val NOT IN ('<unavailable>', '<null>', '<not-set>')
+                  AND curr_val IS NOT NULL AND curr_val NOT IN ('<unavailable>', '<null>', '<not-set>')
+                  AND curr_val <> prev_val)
+              OR (prev_val IS NULL AND curr_val IS NOT NULL
+                  AND curr_val NOT IN ('<unavailable>', '<null>', '<not-set>'))
+              OR (prev_val IS NOT NULL AND prev_val NOT IN ('<unavailable>', '<null>', '<not-set>')
+                  AND curr_val IS NULL))
         ) c
       warehouse_id: ${var.warehouse_id}
       evaluation:
