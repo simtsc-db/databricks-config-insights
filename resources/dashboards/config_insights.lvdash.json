@@ -1,29 +1,29 @@
 {
   "datasets": [
     {
-      "name": "settings_rows_ds",
-      "displayName": "Settings (row level)",
-      "query": "SELECT scope, category, setting_name, workspace_id, workspace_name FROM settings_latest"
+      "name": "current_ds",
+      "displayName": "Current settings",
+      "query": "SELECT scope, category, setting_name, setting_value, workspace_id, workspace_name, is_preview, status, preview_phase FROM settings_latest"
     },
     {
-      "name": "collection_history_ds",
-      "displayName": "Collection History",
-      "query": "SELECT collected_at, COUNT(*) AS settings_count, COUNT(DISTINCT workspace_id) AS workspaces FROM settings_history GROUP BY collected_at ORDER BY collected_at DESC LIMIT 10"
+      "name": "preview_ds",
+      "displayName": "Preview features",
+      "query": "SELECT setting_name, description, preview_phase, workspace_name, workspace_id, setting_value, status, category FROM settings_latest WHERE is_preview"
     },
     {
-      "name": "preview_heatmap_ds",
-      "displayName": "Preview Features",
-      "query": "SELECT feature, description, preview_phase, workspace_name, status FROM preview_heatmap ORDER BY feature, workspace_name"
+      "name": "drift_ds",
+      "displayName": "Configuration drift",
+      "query": "SELECT change_date, setting_name, workspace_name, category, change_type, previous_value, new_value, detected_at FROM settings_drift ORDER BY detected_at DESC"
     },
     {
-      "name": "config_drift_ds",
-      "displayName": "Configuration Drift",
-      "query": "WITH runs AS (SELECT collected_at, DENSE_RANK() OVER (ORDER BY collected_at) AS seq FROM (SELECT DISTINCT collected_at FROM settings_history)), keys AS (SELECT DISTINCT setting_name, COALESCE(workspace_id,0) AS ws FROM settings_history), grid AS (SELECT k.setting_name, k.ws, r.collected_at, r.seq FROM keys k CROSS JOIN runs r), obs AS (SELECT setting_name, COALESCE(workspace_id,0) AS ws, collected_at, MAX(setting_value) AS setting_value, MAX(workspace_name) AS workspace_name, MAX(category) AS category FROM settings_history GROUP BY setting_name, COALESCE(workspace_id,0), collected_at), matrix AS (SELECT g.setting_name, g.ws, g.collected_at, g.seq, o.setting_value, o.workspace_name, o.category FROM grid g LEFT JOIN obs o ON g.setting_name=o.setting_name AND g.ws=o.ws AND g.collected_at=o.collected_at), lagged AS (SELECT setting_name, ws, collected_at, seq, setting_value, workspace_name, category, LAG(setting_value) OVER (PARTITION BY setting_name, ws ORDER BY seq) AS prev_value, LAG(workspace_name) OVER (PARTITION BY setting_name, ws ORDER BY seq) AS prev_ws_name, LAG(category) OVER (PARTITION BY setting_name, ws ORDER BY seq) AS prev_category FROM matrix), cur_cat AS (SELECT setting_name, category FROM (SELECT setting_name, category, ROW_NUMBER() OVER (PARTITION BY setting_name ORDER BY classified_at DESC) AS rn FROM setting_category_map) WHERE rn = 1) SELECT DATE(l.collected_at) AS change_date, l.setting_name, COALESCE(l.workspace_name, l.prev_ws_name) AS workspace_name, COALESCE(cc.category, l.category, l.prev_category) AS category, CASE WHEN l.prev_value IS NULL AND l.setting_value IS NOT NULL AND l.setting_value NOT IN ('<unavailable>','<null>','<not-set>') THEN 'added' WHEN l.prev_value IS NOT NULL AND l.prev_value NOT IN ('<unavailable>','<null>','<not-set>') AND l.setting_value IS NULL THEN 'removed' ELSE 'value_changed' END AS change_type, l.prev_value AS previous_value, l.setting_value AS new_value, l.collected_at AS detected_at FROM lagged l LEFT JOIN cur_cat cc ON cc.setting_name = l.setting_name WHERE l.seq > 1 AND ((l.prev_value IS NOT NULL AND l.prev_value NOT IN ('<unavailable>','<null>','<not-set>') AND l.setting_value IS NOT NULL AND l.setting_value NOT IN ('<unavailable>','<null>','<not-set>') AND l.setting_value <> l.prev_value) OR (l.prev_value IS NULL AND l.setting_value IS NOT NULL AND l.setting_value NOT IN ('<unavailable>','<null>','<not-set>')) OR (l.prev_value IS NOT NULL AND l.prev_value NOT IN ('<unavailable>','<null>','<not-set>') AND l.setting_value IS NULL)) ORDER BY l.collected_at DESC"
-    },
-    {
-      "name": "inconsistencies_ds",
-      "displayName": "Inconsistent Settings",
+      "name": "consistency_ds",
+      "displayName": "Cross-workspace consistency",
       "query": "SELECT setting_name, category, distinct_values, workspace_count, sample_value, consistency_status FROM workspace_comparison ORDER BY consistency_status, distinct_values DESC"
+    },
+    {
+      "name": "history_ds",
+      "displayName": "Collection history",
+      "query": "SELECT collected_at, COUNT(*) AS settings_count, COUNT(DISTINCT workspace_id) AS workspaces FROM settings_history GROUP BY collected_at ORDER BY collected_at DESC LIMIT 10"
     }
   ],
   "pages": [
@@ -42,12 +42,12 @@
         },
         {
           "widget": {
-            "name": "workspace-filter",
+            "name": "overview-workspace-filter",
             "queries": [
               {
-                "name": "ws_settings",
+                "name": "ws_current",
                 "query": {
-                  "datasetName": "settings_rows_ds",
+                  "datasetName": "current_ds",
                   "fields": [
                     {"name": "workspace_name", "expression": "`workspace_name`"},
                     {"name": "workspace_name_associativity", "expression": "COUNT_IF(`associative_filter_context_pass_through`)"}
@@ -56,9 +56,9 @@
                 }
               },
               {
-                "name": "ws_heatmap",
+                "name": "ws_preview",
                 "query": {
-                  "datasetName": "preview_heatmap_ds",
+                  "datasetName": "preview_ds",
                   "fields": [
                     {"name": "workspace_name", "expression": "`workspace_name`"},
                     {"name": "workspace_name_associativity", "expression": "COUNT_IF(`associative_filter_context_pass_through`)"}
@@ -72,14 +72,55 @@
               "widgetType": "filter-single-select",
               "encodings": {
                 "fields": [
-                  {"fieldName": "workspace_name", "displayName": "Workspace", "queryName": "ws_settings"},
-                  {"fieldName": "workspace_name", "displayName": "Workspace", "queryName": "ws_heatmap"}
+                  {"fieldName": "workspace_name", "displayName": "Workspace", "queryName": "ws_current"},
+                  {"fieldName": "workspace_name", "displayName": "Workspace", "queryName": "ws_preview"}
                 ]
               },
               "frame": {"showTitle": true, "title": "Workspace"}
             }
           },
-          "position": {"x": 0, "y": 1, "width": 4, "height": 1}
+          "position": {"x": 0, "y": 1, "width": 3, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "overview-category-filter",
+            "queries": [
+              {
+                "name": "cat_current",
+                "query": {
+                  "datasetName": "current_ds",
+                  "fields": [
+                    {"name": "category", "expression": "`category`"},
+                    {"name": "category_associativity", "expression": "COUNT_IF(`associative_filter_context_pass_through`)"}
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "cat_preview",
+                "query": {
+                  "datasetName": "preview_ds",
+                  "fields": [
+                    {"name": "category", "expression": "`category`"},
+                    {"name": "category_associativity", "expression": "COUNT_IF(`associative_filter_context_pass_through`)"}
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {"fieldName": "category", "displayName": "Category", "queryName": "cat_current"},
+                  {"fieldName": "category", "displayName": "Category", "queryName": "cat_preview"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Category"}
+            }
+          },
+          "position": {"x": 3, "y": 1, "width": 3, "height": 1}
         },
         {
           "widget": {
@@ -87,7 +128,7 @@
             "queries": [{
               "name": "main_query",
               "query": {
-                "datasetName": "settings_rows_ds",
+                "datasetName": "current_ds",
                 "fields": [{"name": "total_settings", "expression": "COUNT(DISTINCT `setting_name`)"}],
                 "disaggregated": false
               }
@@ -95,9 +136,7 @@
             "spec": {
               "version": 2,
               "widgetType": "counter",
-              "encodings": {
-                "value": {"fieldName": "total_settings", "displayName": "Settings Discovered"}
-              },
+              "encodings": {"value": {"fieldName": "total_settings", "displayName": "Settings Discovered"}},
               "frame": {"showTitle": true, "title": "Settings Discovered"}
             }
           },
@@ -109,7 +148,7 @@
             "queries": [{
               "name": "main_query",
               "query": {
-                "datasetName": "settings_rows_ds",
+                "datasetName": "current_ds",
                 "fields": [{"name": "workspace_count", "expression": "COUNT(DISTINCT CASE WHEN `scope` = 'workspace' THEN `workspace_id` END)"}],
                 "disaggregated": false
               }
@@ -117,9 +156,7 @@
             "spec": {
               "version": 2,
               "widgetType": "counter",
-              "encodings": {
-                "value": {"fieldName": "workspace_count", "displayName": "Workspaces Scanned"}
-              },
+              "encodings": {"value": {"fieldName": "workspace_count", "displayName": "Workspaces Scanned"}},
               "frame": {"showTitle": true, "title": "Workspaces Scanned"}
             }
           },
@@ -131,17 +168,15 @@
             "queries": [{
               "name": "main_query",
               "query": {
-                "datasetName": "preview_heatmap_ds",
-                "fields": [{"name": "preview_count", "expression": "COUNT(DISTINCT `feature`)"}],
+                "datasetName": "current_ds",
+                "fields": [{"name": "preview_count", "expression": "COUNT(DISTINCT CASE WHEN `is_preview` THEN `setting_name` END)"}],
                 "disaggregated": false
               }
             }],
             "spec": {
               "version": 2,
               "widgetType": "counter",
-              "encodings": {
-                "value": {"fieldName": "preview_count", "displayName": "Preview Features"}
-              },
+              "encodings": {"value": {"fieldName": "preview_count", "displayName": "Preview Features"}},
               "frame": {"showTitle": true, "title": "Preview Features"}
             }
           },
@@ -153,7 +188,7 @@
             "queries": [{
               "name": "main_query",
               "query": {
-                "datasetName": "settings_rows_ds",
+                "datasetName": "current_ds",
                 "fields": [
                   {"name": "category", "expression": "`category`"},
                   {"name": "setting_count", "expression": "COUNT(DISTINCT `setting_name`)"}
@@ -179,7 +214,7 @@
             "queries": [{
               "name": "main_query",
               "query": {
-                "datasetName": "settings_rows_ds",
+                "datasetName": "current_ds",
                 "fields": [
                   {"name": "scope", "expression": "`scope`"},
                   {"name": "setting_count", "expression": "COUNT(`setting_name`)"}
@@ -205,7 +240,7 @@
             "queries": [{
               "name": "main_query",
               "query": {
-                "datasetName": "collection_history_ds",
+                "datasetName": "history_ds",
                 "fields": [
                   {"name": "collected_at", "expression": "`collected_at`"},
                   {"name": "settings_count", "expression": "`settings_count`"},
@@ -239,7 +274,7 @@
         {
           "widget": {
             "name": "preview-description",
-            "multilineTextboxSpec": {"lines": ["Preview features and their status (ENABLED / DISABLED) per workspace. Use the Workspace filter above, or click a bar (by status or phase) to cross-filter the other preview widgets."]}
+            "multilineTextboxSpec": {"lines": ["Preview features and their status (ENABLED / DISABLED) per workspace. Use the Workspace / Category filters above, or click a status/phase bar to cross-filter the table below."]}
           },
           "position": {"x": 0, "y": 16, "width": 12, "height": 1}
         },
@@ -249,10 +284,10 @@
             "queries": [{
               "name": "main_query",
               "query": {
-                "datasetName": "preview_heatmap_ds",
+                "datasetName": "preview_ds",
                 "fields": [
                   {"name": "status", "expression": "`status`"},
-                  {"name": "count(feature)", "expression": "COUNT(`feature`)"}
+                  {"name": "count(setting_name)", "expression": "COUNT(`setting_name`)"}
                 ],
                 "disaggregated": false
               }
@@ -262,7 +297,7 @@
               "widgetType": "bar",
               "encodings": {
                 "x": {"fieldName": "status", "scale": {"type": "categorical"}, "displayName": "Status"},
-                "y": {"fieldName": "count(feature)", "scale": {"type": "quantitative"}, "displayName": "Feature Count"}
+                "y": {"fieldName": "count(setting_name)", "scale": {"type": "quantitative"}, "displayName": "Feature Count"}
               },
               "frame": {"showTitle": true, "title": "Preview Features by Status"}
             }
@@ -275,10 +310,10 @@
             "queries": [{
               "name": "main_query",
               "query": {
-                "datasetName": "preview_heatmap_ds",
+                "datasetName": "preview_ds",
                 "fields": [
                   {"name": "preview_phase", "expression": "`preview_phase`"},
-                  {"name": "count(feature)", "expression": "COUNT(`feature`)"}
+                  {"name": "count(setting_name)", "expression": "COUNT(`setting_name`)"}
                 ],
                 "disaggregated": false
               }
@@ -288,7 +323,7 @@
               "widgetType": "bar",
               "encodings": {
                 "x": {"fieldName": "preview_phase", "scale": {"type": "categorical"}, "displayName": "Phase"},
-                "y": {"fieldName": "count(feature)", "scale": {"type": "quantitative"}, "displayName": "Feature Count"}
+                "y": {"fieldName": "count(setting_name)", "scale": {"type": "quantitative"}, "displayName": "Feature Count"}
               },
               "frame": {"showTitle": true, "title": "Preview Features by Phase"}
             }
@@ -297,13 +332,13 @@
         },
         {
           "widget": {
-            "name": "preview-heatmap-table",
+            "name": "preview-table",
             "queries": [{
               "name": "main_query",
               "query": {
-                "datasetName": "preview_heatmap_ds",
+                "datasetName": "preview_ds",
                 "fields": [
-                  {"name": "feature", "expression": "`feature`"},
+                  {"name": "setting_name", "expression": "`setting_name`"},
                   {"name": "preview_phase", "expression": "`preview_phase`"},
                   {"name": "workspace_name", "expression": "`workspace_name`"},
                   {"name": "status", "expression": "`status`"},
@@ -317,7 +352,7 @@
               "widgetType": "table",
               "encodings": {
                 "columns": [
-                  {"fieldName": "feature", "displayName": "Feature"},
+                  {"fieldName": "setting_name", "displayName": "Feature"},
                   {"fieldName": "preview_phase", "displayName": "Phase"},
                   {"fieldName": "workspace_name", "displayName": "Workspace"},
                   {"fieldName": "status", "displayName": "Status"},
@@ -346,18 +381,11 @@
         },
         {
           "widget": {
-            "name": "drift-description",
-            "multilineTextboxSpec": {"lines": ["Tracks configuration drift between collection runs: settings whose value changed, plus settings that were added or removed (see the Change column). Use the Workspace filter, or click a bar to cross-filter the table below. Note: the Settings API does not expose who made the change; check the audit log for attribution."]}
-          },
-          "position": {"x": 0, "y": 1, "width": 12, "height": 1}
-        },
-        {
-          "widget": {
             "name": "drift-workspace-filter",
             "queries": [{
               "name": "ws_drift",
               "query": {
-                "datasetName": "config_drift_ds",
+                "datasetName": "drift_ds",
                 "fields": [
                   {"name": "workspace_name", "expression": "`workspace_name`"},
                   {"name": "workspace_name_associativity", "expression": "COUNT_IF(`associative_filter_context_pass_through`)"}
@@ -369,14 +397,60 @@
               "version": 2,
               "widgetType": "filter-single-select",
               "encodings": {
-                "fields": [
-                  {"fieldName": "workspace_name", "displayName": "Workspace", "queryName": "ws_drift"}
-                ]
+                "fields": [{"fieldName": "workspace_name", "displayName": "Workspace", "queryName": "ws_drift"}]
               },
               "frame": {"showTitle": true, "title": "Workspace"}
             }
           },
-          "position": {"x": 0, "y": 2, "width": 4, "height": 1}
+          "position": {"x": 0, "y": 1, "width": 3, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "drift-category-filter",
+            "queries": [
+              {
+                "name": "cat_drift",
+                "query": {
+                  "datasetName": "drift_ds",
+                  "fields": [
+                    {"name": "category", "expression": "`category`"},
+                    {"name": "category_associativity", "expression": "COUNT_IF(`associative_filter_context_pass_through`)"}
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "cat_consistency",
+                "query": {
+                  "datasetName": "consistency_ds",
+                  "fields": [
+                    {"name": "category", "expression": "`category`"},
+                    {"name": "category_associativity", "expression": "COUNT_IF(`associative_filter_context_pass_through`)"}
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {"fieldName": "category", "displayName": "Category", "queryName": "cat_drift"},
+                  {"fieldName": "category", "displayName": "Category", "queryName": "cat_consistency"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Category"}
+            }
+          },
+          "position": {"x": 3, "y": 1, "width": 3, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "drift-description",
+            "multilineTextboxSpec": {"lines": ["Configuration drift between collection runs: value_changed / added / removed (unreadable sentinel values are ignored). Use the filters, or click a bar to cross-filter the table below. The Settings API does not expose who made a change; check the audit log for attribution."]}
+          },
+          "position": {"x": 0, "y": 2, "width": 12, "height": 1}
         },
         {
           "widget": {
@@ -384,7 +458,7 @@
             "queries": [{
               "name": "main_query",
               "query": {
-                "datasetName": "config_drift_ds",
+                "datasetName": "drift_ds",
                 "fields": [
                   {"name": "change_date", "expression": "`change_date`"},
                   {"name": "count(setting_name)", "expression": "COUNT(`setting_name`)"}
@@ -410,7 +484,7 @@
             "queries": [{
               "name": "main_query",
               "query": {
-                "datasetName": "config_drift_ds",
+                "datasetName": "drift_ds",
                 "fields": [
                   {"name": "change_date", "expression": "`change_date`"},
                   {"name": "setting_name", "expression": "`setting_name`"},
@@ -446,11 +520,11 @@
         },
         {
           "widget": {
-            "name": "inconsistencies-table",
+            "name": "consistency-table",
             "queries": [{
               "name": "main_query",
               "query": {
-                "datasetName": "inconsistencies_ds",
+                "datasetName": "consistency_ds",
                 "fields": [
                   {"name": "setting_name", "expression": "`setting_name`"},
                   {"name": "category", "expression": "`category`"},

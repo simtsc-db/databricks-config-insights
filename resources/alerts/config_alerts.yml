@@ -2,75 +2,24 @@ resources:
   alerts:
     drift_detected:
       display_name: "[${bundle.target}] Config Drift Detected"
-      # Detects configuration drift between the two most recent collection runs
-      # and classifies each change as value_changed / added / removed. A grid of
-      # (setting x last-two-runs) is left-joined to actual observations so that
-      # settings which appeared or disappeared are caught too, not just value
-      # changes (the Settings V2 API can add/remove settings over time). The
-      # `changed_settings` column lists exactly what changed for the
-      # notification. Sentinel values (<unavailable> / <null> / <not-set>)
-      # mean the value could not be read reliably, so transitions to/from a
-      # sentinel are ignored (only real value changes, true adds, and true
-      # removes count). Always returns exactly one row.
+      # Reads the settings_drift view (the single source of drift logic: it
+      # already classifies value_changed / added / removed and ignores
+      # unreadable sentinel values) and keeps only the most recent collection
+      # run, so the alert fires only on changes introduced by the latest run.
+      # The `changed_settings` column lists exactly what changed for the
+      # notification. Always returns exactly one row.
       query_text: |
-        WITH runs AS (
-          SELECT collected_at,
-                 DENSE_RANK() OVER (ORDER BY collected_at DESC) AS rnk
-          FROM (SELECT DISTINCT collected_at FROM ${var.catalog}.${var.schema}.settings_history)
-        ),
-        keys AS (
-          SELECT DISTINCT setting_name, COALESCE(workspace_id, 0) AS ws
-          FROM ${var.catalog}.${var.schema}.settings_history
-        ),
-        grid AS (
-          SELECT k.setting_name, k.ws, r.collected_at, r.rnk
-          FROM keys k CROSS JOIN runs r WHERE r.rnk <= 2
-        ),
-        obs AS (
-          SELECT setting_name, COALESCE(workspace_id, 0) AS ws, collected_at,
-                 MAX(setting_value) AS setting_value
-          FROM ${var.catalog}.${var.schema}.settings_history
-          GROUP BY setting_name, COALESCE(workspace_id, 0), collected_at
-        ),
-        matrix AS (
-          SELECT g.setting_name, g.ws, g.rnk, o.setting_value
-          FROM grid g
-          LEFT JOIN obs o
-            ON g.setting_name = o.setting_name AND g.ws = o.ws
-           AND g.collected_at = o.collected_at
-        ),
-        diff AS (
-          SELECT setting_name, ws,
-                 MAX(CASE WHEN rnk = 1 THEN setting_value END) AS curr_val,
-                 MAX(CASE WHEN rnk = 2 THEN setting_value END) AS prev_val
-          FROM matrix
-          GROUP BY setting_name, ws
-        )
         SELECT
           COUNT(*) AS drift_count,
           COALESCE(array_join(collect_list(
-            concat(setting_name, ' [ws ', CAST(ws AS STRING), ']: ', change_type,
-                   ' (', COALESCE(prev_val, '(none)'), ' -> ',
-                   COALESCE(curr_val, '(none)'), ')')
+            concat(setting_name, ' [', COALESCE(workspace_name, '-'), ']: ', change_type,
+                   ' (', COALESCE(previous_value, '(none)'), ' -> ',
+                   COALESCE(new_value, '(none)'), ')')
           ), '; '), '') AS changed_settings
-        FROM (
-          SELECT setting_name, ws, prev_val, curr_val,
-                 CASE WHEN prev_val IS NULL AND curr_val IS NOT NULL
-                           AND curr_val NOT IN ('<unavailable>', '<null>', '<not-set>') THEN 'added'
-                      WHEN prev_val IS NOT NULL
-                           AND prev_val NOT IN ('<unavailable>', '<null>', '<not-set>')
-                           AND curr_val IS NULL THEN 'removed'
-                      ELSE 'value_changed' END AS change_type
-          FROM diff
-          WHERE (SELECT COUNT(*) FROM runs WHERE rnk >= 2) > 0
-            AND ((prev_val IS NOT NULL AND prev_val NOT IN ('<unavailable>', '<null>', '<not-set>')
-                  AND curr_val IS NOT NULL AND curr_val NOT IN ('<unavailable>', '<null>', '<not-set>')
-                  AND curr_val <> prev_val)
-              OR (prev_val IS NULL AND curr_val IS NOT NULL
-                  AND curr_val NOT IN ('<unavailable>', '<null>', '<not-set>'))
-              OR (prev_val IS NOT NULL AND prev_val NOT IN ('<unavailable>', '<null>', '<not-set>')
-                  AND curr_val IS NULL))
-        ) c
+        FROM ${var.catalog}.${var.schema}.settings_drift
+        WHERE detected_at = (
+          SELECT MAX(collected_at) FROM ${var.catalog}.${var.schema}.settings_history
+        )
       warehouse_id: ${var.warehouse_id}
       evaluation:
         comparison_operator: "GREATER_THAN"

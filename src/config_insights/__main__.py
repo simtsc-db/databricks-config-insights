@@ -187,7 +187,7 @@ def main() -> int:
         ensure_table_properties,
         create_latest_snapshot_view,
         create_pivot_view,
-        create_heatmap_view,
+        create_drift_view,
     )
 
     spark = SparkSession.builder.getOrCreate()
@@ -207,12 +207,13 @@ def main() -> int:
     # downstream incremental consumers.
     ensure_table_properties(spark, table_name)
 
-    # Create convenience views
-    create_latest_snapshot_view(spark, table_name, view_latest)
-    create_pivot_view(spark, table_name, view_comparison)
-    create_heatmap_view(
-        spark, table_name, f"{catalog}.{schema}.preview_heatmap"
-    )
+    # Create convenience views. Category is resolved from the category map
+    # (single source of truth) inside each view, so they never go stale.
+    map_table = f"{catalog}.{schema}.setting_category_map"
+    view_drift = f"{catalog}.{schema}.settings_drift"
+    create_latest_snapshot_view(spark, table_name, view_latest, map_table)
+    create_pivot_view(spark, table_name, view_comparison, map_table)
+    create_drift_view(spark, table_name, view_drift, map_table)
 
     logger.info("Collection complete: %d settings written to %s", len(records), table_name)
 

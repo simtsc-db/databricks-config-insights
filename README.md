@@ -19,7 +19,7 @@ laptop.
 | **AI categorization** | Each setting is classified into a **configurable** functional category (governance, ingestion, AI, ML, compute, …) with `ai_classify`. Results are cached, so only new settings are ever re-classified. |
 | **Preview feature tracking** | Settings carry a `preview_phase` (`PRIVATE_PREVIEW`, `BETA`, `PUBLIC_PREVIEW`, …). Previews are surfaced automatically with a dedicated enabled/disabled section. Preview is a *lifecycle* dimension, kept separate from the functional category. |
 | **Schema evolution** | The Delta table is written with `mergeSchema=true`, so new metadata fields added by Databricks appear as new columns with no DDL changes. |
-| **Change detection** | Exact snapshot-to-snapshot comparison classifies every change as **value_changed**, **added**, or **removed** — so settings that appear or disappear from the Settings V2 API are caught too, not just value flips. Pure SQL over `settings_history` powers both the Configuration Drift page and the alerts. |
+| **Change detection** | The `settings_drift` view classifies every change as **value_changed**, **added**, or **removed** (unreadable sentinel values are ignored) — so settings that appear or disappear from the Settings V2 API are caught too, not just value flips. One view powers both the Configuration Drift page and the `drift_detected` alert. |
 | **Alerting** | Two SQL alerts fire on config drift and newly enabled preview features, and list **exactly what changed** in the notification body. |
 | **Zero maintenance** | New settings/previews added by Databricks are captured on the next run; deprecated ones simply stop appearing. |
 
@@ -33,17 +33,17 @@ laptop.
 
 ### Overview & Previews
 Totals, category/scope breakdowns, collection history, and the preview-feature
-section (status/phase bars + enabled/disabled table). A **Workspace** filter
-scopes the whole page, and widgets that share a dataset **cross-filter** each
-other (e.g. click a category to filter the counters and scope pie, or a preview
-status/phase bar to filter the preview table).
+section (status/phase bars + enabled/disabled table). **Workspace** and
+**Category** filters scope the whole page, and widgets that share a dataset
+**cross-filter** each other (e.g. click a category to filter the counters and
+scope pie, or a preview status/phase bar to filter the preview table).
 
 ![Overview & Previews](docs/images/01-overview.png)
 
 ### Configuration Drift
-A **Workspace** filter plus changes-per-day bars that cross-filter a
-change-detail table (value_changed / added / removed), plus cross-workspace
-consistency.
+**Workspace** and **Category** filters plus changes-per-day bars that
+cross-filter a change-detail table (value_changed / added / removed), plus
+cross-workspace consistency.
 
 ![Configuration Drift](docs/images/02-configuration-drift.png)
 
@@ -63,7 +63,8 @@ consistency.
 ┌───────────────────────────────────────────────────────────────────────────┐
 │  Delta: <catalog>.<schema>.settings_history   (schema-evolving)            │
 │    collected_at │ scope │ workspace │ setting_name │ setting_value │ …      │
-│  Views: settings_latest · workspace_comparison · preview_heatmap           │
+│  + setting_category_map  (setting_name -> category, via ai_classify)       │
+│  Views: settings_latest · settings_drift · workspace_comparison            │
 └───────────────────────────────────┬───────────────────────────────────────┘
                                      │  exact snapshot-to-snapshot SQL
                                      │  (value_changed / added / removed)
@@ -191,8 +192,9 @@ defaults in `databricks.yml`.
 > every `deploy`/`run` (or set `BUNDLE_VAR_catalog` in your environment).
 
 **Single, harmonized storage location.** Everything the tool creates — the
-`settings_history` table, the `settings_latest` / `workspace_comparison` /
-`preview_heatmap` views, the dashboard datasets, and the SQL alerts — lives in
+`settings_history` table, the `setting_category_map` table, the
+`settings_latest` / `settings_drift` / `workspace_comparison` views, the
+dashboard datasets, and the SQL alerts — lives in
 the same **`${catalog}.${schema}`**. Change those two variables and the whole
 tool (job, dashboard, alerts) follows. Nothing is pinned to a hardcoded catalog
 or schema.
@@ -244,17 +246,33 @@ requires the workspace to have serverless / Foundation Model APIs available. The
 **preview/lifecycle** dimension is kept separate (`preview_phase`), so "preview"
 is deliberately not a category.
 
+### Dashboard data model
+
+The dashboard is intentionally thin: each dataset is a `SELECT ... FROM <view>`,
+and all logic (category resolution, preview flag, drift classification) lives in
+the collector-created views. Datasets:
+
+| Dataset | Backed by | Used on |
+|---|---|---|
+| `current_ds` | `settings_latest` | Overview counters, category & scope charts |
+| `preview_ds` | `settings_latest WHERE is_preview` | Preview section |
+| `drift_ds` | `settings_drift` | Drift bar + detail table |
+| `consistency_ds` | `workspace_comparison` | Cross-workspace consistency |
+| `history_ds` | `settings_history` (per-run summary) | Collection history |
+
 ### Dashboard filtering
 
-- **Workspace filter** — each page has a single-select *Workspace* filter that
-  scopes every widget sourced from a workspace-aware dataset. With account-level
-  scanning off there is a single workspace to choose; it becomes a real
-  comparison control once multiple workspaces are collected.
+- **Workspace + Category filters** — each of the two pages has a single-select
+  *Workspace* filter and a multi-select *Category* filter that scope every
+  widget on that page. (With account-level scanning off there is a single
+  workspace to choose; it becomes a real comparison control once multiple
+  workspaces are collected.)
 - **Cross-filtering** — clicking a data point filters the other widgets that
-  share the same dataset **on the same page** (e.g. click a category bar to
-  filter the counters and the scope pie; click a preview status/phase bar to
-  filter the preview table). Cross-filtering cannot span pages or datasets — a
-  Lakeview platform constraint.
+  share the same dataset **on the same page** (e.g. on Overview, click a
+  category bar to filter the counters and the scope pie; click a preview
+  status/phase bar to filter the preview table). Click cross-filtering cannot
+  span pages or datasets — a Lakeview platform constraint — which is why the
+  Workspace/Category filter widgets are repeated on each page.
 
 ### Schema evolution
 
