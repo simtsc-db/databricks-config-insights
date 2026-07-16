@@ -16,7 +16,8 @@ laptop.
 | Capability | How it works |
 |---|---|
 | **Complete discovery** | The Settings V2 metadata API (`list_*_settings_metadata()`) is self-describing, so **every** available setting is enumerated automatically — nothing is hardcoded. |
-| **Preview feature tracking** | Settings carry a `preview_phase` (`PRIVATE_PREVIEW`, `BETA`, `PUBLIC_PREVIEW`, …). Previews are surfaced automatically with a dedicated enabled/disabled heatmap. |
+| **AI categorization** | Each setting is classified into a **configurable** functional category (governance, ingestion, AI, ML, compute, …) with `ai_classify`. Results are cached, so only new settings are ever re-classified. |
+| **Preview feature tracking** | Settings carry a `preview_phase` (`PRIVATE_PREVIEW`, `BETA`, `PUBLIC_PREVIEW`, …). Previews are surfaced automatically with a dedicated enabled/disabled section. Preview is a *lifecycle* dimension, kept separate from the functional category. |
 | **Schema evolution** | The Delta table is written with `mergeSchema=true`, so new metadata fields added by Databricks appear as new columns with no DDL changes. |
 | **Change detection** | Exact snapshot-to-snapshot comparison classifies every change as **value_changed**, **added**, or **removed** — so settings that appear or disappear from the Settings V2 API are caught too, not just value flips. Pure SQL over `settings_history` powers both the Configuration Drift page and the alerts. |
 | **Alerting** | Two SQL alerts fire on config drift and newly enabled preview features, and list **exactly what changed** in the notification body. |
@@ -32,13 +33,17 @@ laptop.
 
 ### Overview & Previews
 Totals, category/scope breakdowns, collection history, and the preview-feature
-section: status/phase bars that **cross-filter** the enabled/disabled table.
+section (status/phase bars + enabled/disabled table). A **Workspace** filter
+scopes the whole page, and widgets that share a dataset **cross-filter** each
+other (e.g. click a category to filter the counters and scope pie, or a preview
+status/phase bar to filter the preview table).
 
 ![Overview & Previews](docs/images/01-overview.png)
 
 ### Configuration Drift
-Changes per day cross-filtering a change-detail table (value_changed / added /
-removed), plus cross-workspace consistency.
+A **Workspace** filter plus changes-per-day bars that cross-filter a
+change-detail table (value_changed / added / removed), plus cross-workspace
+consistency.
 
 ![Configuration Drift](docs/images/02-configuration-drift.png)
 
@@ -94,6 +99,7 @@ databricks-config-insights/
 │       ├── __main__.py                 # Job entry point (`collect`)
 │       ├── collector.py                # Orchestration
 │       ├── discovery.py                # Dynamic Settings V2 discovery (no hardcoded keys)
+│       ├── categorize.py               # ai_classify categorization + cached map table
 │       └── writer.py                   # Schema-evolving Delta writer + views
 └── docs/
     └── images/                         # Dashboard screenshots
@@ -173,10 +179,16 @@ defaults in `databricks.yml`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `catalog` | `main` | Unity Catalog for the settings tables and views. |
+| `catalog` | `main` | Unity Catalog for the settings tables and views. **Must be an existing catalog you can access** — override it per deploy (see troubleshooting for the `main` gotcha). |
 | `schema` | `config_insights` | Schema within the catalog. |
 | `warehouse_id` | *(required)* | SQL warehouse for the dashboard and alerts. |
+| `categories` | `governance,ingestion,AI,ML,compute,marketplace,platform,other` | Comma-separated functional categories used by `ai_classify`. Preview is *not* a category (it's tracked via `preview_phase`). Changing this list re-classifies settings on the next run. |
 | `account_id` | `"none"` | Optional account ID for cross-workspace scanning (requires account admin). `none` (or empty) ⇒ workspace-only mode. Must be a non-empty string — Terraform rejects null job parameters. |
+
+> **Note on `catalog`:** nothing is hardcoded — the catalog is always the
+> `catalog` variable. The default `main` is just a convention; if your workspace
+> has no accessible `main` catalog, pass `--var="catalog=<your-catalog>"` on
+> every `deploy`/`run` (or set `BUNDLE_VAR_catalog` in your environment).
 
 **Single, harmonized storage location.** Everything the tool creates — the
 `settings_history` table, the `settings_latest` / `workspace_comparison` /
@@ -212,6 +224,37 @@ for meta in ws_client.settings_v2.list_workspace_settings_metadata():
     value = ws_client.settings_v2.get_public_workspace_setting(name=meta.name)
     # …normalized into a row: setting_name, setting_value, category, preview_phase, …
 ```
+
+### AI categorization (`ai_classify`)
+
+Each setting is classified into exactly one **functional** category from the
+configurable `categories` list using the `ai_classify` SQL function, based on
+the setting name and description:
+
+```sql
+ai_classify(concat(setting_name, ': ', description),
+            array('governance','ingestion','AI','ML','compute','marketplace','platform','other'))
+```
+
+Results are cached in a `setting_category_map` table keyed by setting name and a
+hash of the active label set, so a warm run makes **zero** `ai_classify` calls —
+only genuinely new settings (or a changed `categories` list) are re-classified.
+Categorization relies solely on `ai_classify` (no keyword fallback); this
+requires the workspace to have serverless / Foundation Model APIs available. The
+**preview/lifecycle** dimension is kept separate (`preview_phase`), so "preview"
+is deliberately not a category.
+
+### Dashboard filtering
+
+- **Workspace filter** — each page has a single-select *Workspace* filter that
+  scopes every widget sourced from a workspace-aware dataset. With account-level
+  scanning off there is a single workspace to choose; it becomes a real
+  comparison control once multiple workspaces are collected.
+- **Cross-filtering** — clicking a data point filters the other widgets that
+  share the same dataset **on the same page** (e.g. click a category bar to
+  filter the counters and the scope pie; click a preview status/phase bar to
+  filter the preview table). Cross-filtering cannot span pages or datasets — a
+  Lakeview platform constraint.
 
 ### Schema evolution
 
@@ -261,4 +304,6 @@ mode — still fully functional for the current workspace.
 | `Falling back to workspace-only mode` | The job identity is not an account admin. Expected unless you configured account-level scanning. |
 | Dashboard widgets show *no data* | Run the collector at least once; drift needs **two** runs before metrics appear. |
 | `Metastore storage root URL does not exist` on `CREATE CATALOG` | Point `catalog` at an existing catalog — the job uses `USE CATALOG` + `CREATE SCHEMA`, it does not create catalogs. |
+| Dashboard widgets show `[INSUFFICIENT_PERMISSIONS] Catalog 'main' is not accessible` | You deployed without overriding `catalog`, so it defaulted to `main`. Redeploy with `--var="catalog=<your-catalog>"` (the same one the collector wrote to). |
+| Categories all `NULL` / *Settings by Category* empty | `ai_classify` was unavailable (needs serverless + Foundation Model APIs). Check the job logs for the categorization error; there is no keyword fallback by design. |
 | Alerts always report 0 / never trigger | Drift and new-preview detection compares each setting to its **previous** observation, so at least **two** collection runs must exist before anything can fire. |

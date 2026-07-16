@@ -4,12 +4,18 @@ Designed to run as a Databricks serverless job task. Uses:
 - AccountClient for cross-workspace discovery
 - SparkSession for Delta writes with schema evolution
 
-Drift detection is handled downstream by the dashboard and SQL alerts via
-exact snapshot-to-snapshot comparison of settings_history.
+Settings are classified into functional categories via ai_classify. Drift
+detection is handled downstream by the dashboard and SQL alerts via exact
+snapshot-to-snapshot comparison of settings_history.
 
 Environment variables / job parameters:
-  CONFIG_CATALOG  - Output catalog (default: config_insights)
-  CONFIG_SCHEMA   - Output schema (default: default)
+  --catalog / CONFIG_CATALOG        Output catalog (default: config_insights)
+  --schema / CONFIG_SCHEMA          Output schema (default: default)
+  --account-id / DATABRICKS_ACCOUNT_ID
+                                    Account ID for cross-workspace scanning;
+                                    "none"/empty ⇒ workspace-only mode
+  --categories / CONFIG_CATEGORIES  Comma-separated functional categories used
+                                    by ai_classify (preview is NOT a category)
 """
 
 import argparse
@@ -48,6 +54,14 @@ def main() -> int:
         help="Comma-separated workspace IDs to scan (default: all)",
     )
     parser.add_argument(
+        "--categories",
+        default=os.environ.get(
+            "CONFIG_CATEGORIES",
+            "governance,ingestion,AI,ML,compute,marketplace,platform,other",
+        ),
+        help="Comma-separated functional categories for ai_classify",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Collect and print settings without writing to Delta",
@@ -56,6 +70,7 @@ def main() -> int:
 
     catalog = args.catalog
     schema = args.schema
+    categories = [c.strip() for c in args.categories.split(",") if c.strip()]
     table_name = f"{catalog}.{schema}.settings_history"
     view_latest = f"{catalog}.{schema}.settings_latest"
     view_comparison = f"{catalog}.{schema}.workspace_comparison"
@@ -166,6 +181,7 @@ def main() -> int:
 
     # Write to Delta with schema evolution
     from pyspark.sql import SparkSession
+    from config_insights.categorize import classify_settings
     from config_insights.writer import (
         write_settings,
         ensure_table_properties,
@@ -179,6 +195,10 @@ def main() -> int:
     # Ensure schema exists (catalog must already exist)
     spark.sql(f"USE CATALOG {catalog}")
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}")
+
+    # Classify each setting into a functional category via ai_classify
+    # (cached in setting_category_map). Preview/lifecycle stays separate.
+    classify_settings(spark, records, catalog, schema, categories)
 
     # Write with schema evolution (new settings = new rows, not columns)
     write_settings(spark, records, table_name)

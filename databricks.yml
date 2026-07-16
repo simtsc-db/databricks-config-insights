@@ -24,6 +24,12 @@ variables:
     default: config_insights
   warehouse_id:
     description: SQL warehouse ID used by the dashboard and the SQL alerts.
+  categories:
+    description: >
+      Comma-separated functional categories used to classify each setting via
+      ai_classify. Preview/lifecycle is tracked separately (preview_phase), so
+      "preview" is intentionally not a category.
+    default: "governance,ingestion,AI,ML,compute,marketplace,platform,other"
   account_id:
     description: >
       (Optional) Databricks account ID for cross-workspace scanning. Requires the

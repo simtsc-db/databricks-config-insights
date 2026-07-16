@@ -65,7 +65,7 @@ def discover_account_settings(
                 setting_value=value,
                 setting_type=getattr(meta, "type", "unknown"),
                 source="settings_v2",
-                category=_infer_category(name, meta),
+                category=None,
                 preview_phase=_get_preview_phase(meta),
                 description=getattr(meta, "description", None),
             )
@@ -122,7 +122,7 @@ def discover_workspace_settings(
                 setting_value=value,
                 setting_type=getattr(meta, "type", "unknown"),
                 source="settings_v2",
-                category=_infer_category(name, meta),
+                category=None,
                 preview_phase=_get_preview_phase(meta),
                 description=getattr(meta, "description", None),
             )
@@ -221,32 +221,6 @@ def _get_preview_phase(meta) -> Optional[str]:
     if phase is None:
         return None
     return str(phase)
-
-
-def _infer_category(name: str, meta) -> str:
-    """Infer category from setting name and metadata.
-
-    Checks name-based patterns first (security, compute, etc.), then
-    falls back to preview_phase classification. This ensures security
-    settings are always tagged as 'security' even if they have a preview phase.
-    """
-    name_lower = name.lower()
-    if any(k in name_lower for k in ("security", "csp", "esm", "encrypt", "token", "ip_access", "disable_legacy")):
-        return "security"
-    if any(k in name_lower for k in ("cluster", "compute", "serverless", "warehouse")):
-        return "compute"
-    if any(k in name_lower for k in ("catalog", "namespace", "sharing", "download", "export", "volume")):
-        return "data"
-    if any(k in name_lower for k in ("network", "private", "vpc", "endpoint")):
-        return "network"
-    if any(k in name_lower for k in ("admin", "user", "principal", "identity")):
-        return "identity"
-
-    phase = getattr(meta, "preview_phase", None)
-    if phase and str(phase) not in ("GA", "None", ""):
-        return "preview"
-
-    return "general"
 
 
 def _build_record(
