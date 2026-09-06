@@ -1,7 +1,7 @@
 resources:
   alerts:
     drift_detected:
-      display_name: "[${bundle.target}] Config Drift Detected"
+      display_name: "Config Drift Detected"
       # Reads the settings_drift view (the single source of drift logic: it
       # already classifies value_changed / added / removed and ignores
       # unreadable sentinel values) and keeps only the most recent collection
@@ -42,7 +42,7 @@ resources:
           group_name: "users"
 
     new_preview_enabled:
-      display_name: "[${bundle.target}] New Preview Feature Enabled"
+      display_name: "New Preview Feature Enabled"
       # Fires when a preview feature flips to enabled vs. its previous
       # observation (or appears already enabled on first sight). A single LAG()
       # window compares each preview setting to its own prior snapshot; the
