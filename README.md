@@ -27,7 +27,7 @@ laptop.
 
 ## Screenshots
 
-> Screenshots are captured from a live deployment. To regenerate them from your
+> Screenshots are not included in this repository. To capture them from your
 > own workspace, open the deployed **Configuration Insights** dashboard and export
 > each page (see [`docs/images/README.md`](docs/images/README.md)).
 
@@ -38,14 +38,10 @@ section (status/phase bars + enabled/disabled table). **Workspace** and
 **cross-filter** each other (e.g. click a category to filter the counters and
 scope pie, or a preview status/phase bar to filter the preview table).
 
-![Overview & Previews](docs/images/01-overview.png)
-
 ### Configuration Drift
 **Workspace** and **Category** filters plus changes-per-day bars that
 cross-filter a change-detail table (value_changed / added / removed), plus
 cross-workspace consistency.
-
-![Configuration Drift](docs/images/02-configuration-drift.png)
 
 ---
 
