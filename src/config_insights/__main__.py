@@ -9,8 +9,8 @@ detection is handled downstream by the dashboard and SQL alerts via exact
 snapshot-to-snapshot comparison of settings_history.
 
 Environment variables / job parameters:
-  --catalog / CONFIG_CATALOG        Output catalog (default: config_insights)
-  --schema / CONFIG_SCHEMA          Output schema (default: default)
+  --catalog / CONFIG_CATALOG        Output catalog (default: main)
+  --schema / CONFIG_SCHEMA          Output schema (default: config_insights)
   --account-id / DATABRICKS_ACCOUNT_ID
                                     Account ID for cross-workspace scanning;
                                     "none"/empty ⇒ workspace-only mode
@@ -37,11 +37,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--catalog",
-        default=os.environ.get("CONFIG_CATALOG", "config_insights"),
+        default=os.environ.get("CONFIG_CATALOG", "main"),
     )
     parser.add_argument(
         "--schema",
-        default=os.environ.get("CONFIG_SCHEMA", "default"),
+        default=os.environ.get("CONFIG_SCHEMA", "config_insights"),
     )
     parser.add_argument(
         "--account-id",
@@ -143,10 +143,9 @@ def main() -> int:
             except (ValueError, TypeError):
                 pass
 
-        # Resolve workspace name (try deployment name from status API)
+        # Resolve workspace name from the configured host
         workspace_name = ws_client.config.host.replace("https://", "").split(".")[0]
         try:
-            status = ws_client.workspace.get_status("/")
             deployment_name = ws_client.config.host.replace("https://", "").replace(".cloud.databricks.com", "")
             if deployment_name:
                 workspace_name = deployment_name
