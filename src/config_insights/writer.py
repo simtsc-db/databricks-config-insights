@@ -320,8 +320,10 @@ def create_drift_view(
 
 AUDIT_TABLE = "system.access.audit"
 
-# Attribution status enum (also surfaced on the dashboard/alert).
-ATTR_ATTRIBUTED = "ATTRIBUTED"                        # a matching audit event was found
+# Attribution status enum (also surfaced on the dashboard/alert). Note the
+# distinction between EVENT existence and ACTOR availability:
+ATTR_ATTRIBUTED = "ATTRIBUTED"                        # matching event found AND actor email present
+ATTR_ACTOR_UNKNOWN = "ATTRIBUTED_ACTOR_UNKNOWN"       # matching event found but user_identity.email is NULL
 ATTR_NO_AUDIT_MATCH = "NO_AUDIT_MATCH"                # audit readable, but no event matched
 ATTR_NOT_ACCESSIBLE = "AUDIT_NOT_ACCESSIBLE"          # missing SELECT on system.access
 ATTR_ACCOUNT_UNAVAILABLE = "ACCOUNT_AUDIT_UNAVAILABLE"  # audit schema not enabled / not found
@@ -337,6 +339,55 @@ _CONFIG_AUDIT_SERVICES = (
     "('workspace', 'accounts', 'unityCatalog', 'ipAccessLists', "
     "'tokens', 'settings', 'settingsV2', 'featureStore', 'clusterPolicies')"
 )
+
+# Config-CHANGE (mutation) action allowlist for the UNMAPPED fallback. Without a
+# setting_action_map row we would otherwise accept ANY successful event from a
+# config service, letting a later READ/LIST event inside the change-window
+# outrank the real change (ROW_NUMBER over event_time DESC) and wrongly
+# attribute the reader. This restricts unmapped fallback candidates to mutating
+# actions (create/update/replace/delete/set/.../*edit). When a setting_action_map
+# row exists we use its specific action instead, so this guard is fallback-only.
+# `a` is the audit_events alias in the attributed view.
+_MUTATION_ACTION_PREDICATE = (
+    "(lower(a.action_name) RLIKE "
+    "'^(create|update|replace|delete|set|add|remove|insert|put|patch|enable|"
+    "disable|change|edit|grant|revoke|assign|unassign|rotate|generate|register|"
+    "deregister|attach|detach|move|rename|transfer|reset|upsert)' "
+    "OR lower(a.action_name) LIKE '%edit')"
+)
+
+
+def classify_audit_error(exc: Exception) -> str:
+    """Map an audit-access failure to the right attribution status.
+
+    Distinguishes a permission problem (missing SELECT on ``system.access`` ->
+    ``ATTR_NOT_ACCESSIBLE``) from the audit schema not being enabled/found
+    (``ATTR_ACCOUNT_UNAVAILABLE``). Unknown failures degrade to
+    ``ATTR_NOT_ACCESSIBLE``.
+    """
+    msg = str(exc).upper()
+    not_found_markers = (
+        "TABLE_OR_VIEW_NOT_FOUND",
+        "SCHEMA_NOT_FOUND",
+        "NAMESPACE_NOT_FOUND",
+        "DOES NOT EXIST",
+        "CANNOT BE FOUND",
+        "NOT FOUND",
+    )
+    perm_markers = (
+        "PERMISSION",
+        "INSUFFICIENT_PRIVILEGES",
+        "INSUFFICIENT PRIVILEGES",
+        "ACCESS DENIED",
+        "NOT AUTHORIZED",
+        "REQUIRES",
+        "UNAUTHORIZED",
+    )
+    if any(m in msg for m in not_found_markers):
+        return ATTR_ACCOUNT_UNAVAILABLE
+    if any(m in msg for m in perm_markers):
+        return ATTR_NOT_ACCESSIBLE
+    return ATTR_NOT_ACCESSIBLE
 
 
 def probe_audit_access(spark: SparkSession) -> str:
@@ -360,43 +411,20 @@ def probe_audit_access(spark: SparkSession) -> str:
         logger.info("Audit probe: %s is readable", AUDIT_TABLE)
         return AUDIT_MODE_ACCESSIBLE
     except Exception as e:  # noqa: BLE001 - must never fail the job
-        msg = str(e).upper()
-        not_found_markers = (
-            "TABLE_OR_VIEW_NOT_FOUND",
-            "SCHEMA_NOT_FOUND",
-            "NAMESPACE_NOT_FOUND",
-            "DOES NOT EXIST",
-            "CANNOT BE FOUND",
-            "NOT FOUND",
-        )
-        perm_markers = (
-            "PERMISSION",
-            "INSUFFICIENT_PRIVILEGES",
-            "INSUFFICIENT PRIVILEGES",
-            "ACCESS DENIED",
-            "NOT AUTHORIZED",
-            "REQUIRES",
-            "UNAUTHORIZED",
-        )
-        if any(m in msg for m in not_found_markers):
+        status = classify_audit_error(e)
+        if status == ATTR_ACCOUNT_UNAVAILABLE:
             logger.warning(
                 "Audit probe: %s not found -> audit schema not enabled (%s)",
                 AUDIT_TABLE, e,
             )
-            return ATTR_ACCOUNT_UNAVAILABLE
-        if any(m in msg for m in perm_markers):
+        else:
             logger.warning(
-                "Audit probe: no SELECT on system.access (%s). Grant "
+                "Audit probe: system.access not readable (%s). Grant "
                 "USE CATALOG ON system, USE SCHEMA + SELECT ON SCHEMA "
                 "system.access (metastore admin) to enable attribution.",
                 e,
             )
-            return ATTR_NOT_ACCESSIBLE
-        logger.warning(
-            "Audit probe failed unexpectedly (%s); degrading attribution to %s",
-            e, ATTR_NOT_ACCESSIBLE,
-        )
-        return ATTR_NOT_ACCESSIBLE
+        return status
 
 
 def ensure_setting_action_map(spark: SparkSession, action_map_table: str) -> None:
@@ -484,7 +512,11 @@ def create_drift_attributed_view(
     ROW_NUMBER() over event_time DESC. Workspace-scoped drift (workspace_id > 0)
     joins on that workspace_id; account-scoped drift (workspace_id = 0) joins on
     account-level events (workspace_id = 0). ``setting_action_map`` tightens the
-    match when a mapping exists; otherwise the time-window match is used.
+    match when a mapping exists; UNMAPPED settings fall back to a workspace
+    time-window match RESTRICTED to config-CHANGE (mutation) actions, so a later
+    successful read/list event cannot be mis-attributed as the change. A matched
+    event with no actor email yields ``ATTRIBUTED_ACTOR_UNKNOWN`` (not
+    ``NO_AUDIT_MATCH``): we know a change happened in-window but cannot name who.
 
     When audit is NOT accessible the view degrades to the drift rows plus NULL
     ``changed_by`` / ``changed_at`` / ``action_name`` and a constant
@@ -555,8 +587,11 @@ def create_drift_attributed_view(
                 AND a.event_time > d.previous_collected_at
                 AND a.event_time <= d.detected_at
                 AND (
-                    -- No mapping for this setting: workspace time-window match.
-                    m.action_name IS NULL
+                    -- No mapping for this setting: workspace time-window match,
+                    -- RESTRICTED to config-CHANGE (mutation) actions so a later
+                    -- successful read/list event in the window cannot outrank
+                    -- (and steal attribution from) the real change.
+                    (m.action_name IS NULL AND {_MUTATION_ACTION_PREDICATE})
                     -- Mapping exists: tighten to the mapped action (+ service).
                     OR (a.action_name = m.action_name
                         AND (m.service_name IS NULL
@@ -570,8 +605,16 @@ def create_drift_attributed_view(
             CASE WHEN rn = 1 THEN actor_email END AS changed_by,
             CASE WHEN rn = 1 THEN audit_event_time END AS changed_at,
             CASE WHEN rn = 1 THEN audit_action_name END AS action_name,
+            -- Distinguish EVENT existence from ACTOR availability. A matched
+            -- config event (audit_event_time IS NOT NULL) with no actor email
+            -- is ATTRIBUTED_ACTOR_UNKNOWN, NOT NO_AUDIT_MATCH -- we know a change
+            -- happened in-window, we just can't name the actor. No matched event
+            -- (LEFT JOIN produced NULLs) is NO_AUDIT_MATCH.
             CASE
-                WHEN rn = 1 AND actor_email IS NOT NULL THEN '{ATTR_ATTRIBUTED}'
+                WHEN rn = 1 AND audit_event_time IS NOT NULL
+                     AND actor_email IS NOT NULL THEN '{ATTR_ATTRIBUTED}'
+                WHEN rn = 1 AND audit_event_time IS NOT NULL
+                     AND actor_email IS NULL THEN '{ATTR_ACTOR_UNKNOWN}'
                 ELSE '{ATTR_NO_AUDIT_MATCH}'
             END AS attribution_status
         FROM ranked

@@ -191,7 +191,7 @@ def main() -> int:
         probe_audit_access,
         ensure_setting_action_map,
         create_drift_attributed_view,
-        ATTR_NOT_ACCESSIBLE,
+        classify_audit_error,
     )
 
     spark = SparkSession.builder.getOrCreate()
@@ -233,14 +233,20 @@ def main() -> int:
             spark, view_drift, action_map_table, view_drift_attr, audit_mode
         )
     except Exception as e:  # noqa: BLE001 - attribution is best-effort
+        # Classify the failure rather than assuming permissions: e.g. a
+        # TABLE/SCHEMA_NOT_FOUND raised while building the view (after a probe
+        # that happened to pass) maps to ACCOUNT_AUDIT_UNAVAILABLE, not
+        # AUDIT_NOT_ACCESSIBLE.
+        degraded_status = classify_audit_error(e)
         logger.warning(
             "Attribution enrichment failed (%s). Building degraded "
-            "settings_drift_attributed with NULL actor.", e,
+            "settings_drift_attributed with NULL actor (status=%s).",
+            e, degraded_status,
         )
         try:
             create_drift_attributed_view(
                 spark, view_drift, action_map_table, view_drift_attr,
-                ATTR_NOT_ACCESSIBLE,
+                degraded_status,
             )
         except Exception as e2:  # noqa: BLE001
             logger.warning("Could not build degraded attributed view: %s", e2)

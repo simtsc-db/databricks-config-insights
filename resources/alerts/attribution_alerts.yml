@@ -2,16 +2,24 @@ resources:
   alerts:
     security_setting_changed_attributed:
       display_name: "[${bundle.target}] Security Setting Changed (attributed)"
-      # Fires when a security/governance-relevant setting drifts in the latest
-      # collection run AND the change could be attributed to an actor via the
-      # Unity Catalog audit log (system.access.audit). Reads the
-      # settings_drift_attributed view (single source of attribution logic:
-      # nearest-preceding successful audit event in the snapshot change-window,
-      # correlation NOT proof). "Security-relevant" = the governance category OR
-      # a known security-sensitive audit action_name (IP access lists, tokens).
-      # The `changes` column lists exactly what changed and who. Requires SELECT
-      # on system.access; without it changed_by is NULL and this alert stays
-      # quiet (attribution_status <> 'ATTRIBUTED'). Always returns one row.
+      # Fires when a SECURITY-RELEVANT setting drifts in the latest collection
+      # run AND the change could be attributed to an actor via the Unity Catalog
+      # audit log (system.access.audit). Reads the settings_drift_attributed view
+      # (single source of attribution logic: nearest-preceding successful audit
+      # event in the snapshot change-window, correlation NOT proof).
+      #
+      # "Security-relevant" is scoped deliberately narrowly so ordinary config
+      # edits do NOT trip this alert:
+      #   - the setting's functional category is governance/security, OR
+      #   - the attributed audit action is an INHERENTLY security-sensitive one
+      #     (IP access list or token create/update/replace/delete).
+      # The generic 'workspaceConfEdit' action is intentionally NOT a standalone
+      # trigger -- it covers every workspace config toggle, so it only matters
+      # here when the setting's category is already governance/security (the
+      # first branch). The `changes` column lists exactly what changed and who.
+      # Requires SELECT on system.access; without it changed_by is NULL and this
+      # alert stays quiet (attribution_status <> 'ATTRIBUTED'). Always returns
+      # one row.
       query_text: |
         SELECT
           COUNT(*) AS security_changes,
@@ -30,7 +38,7 @@ resources:
           LOWER(category) IN ('governance', 'security')
           OR action_name IN (
             'updateIpAccessList', 'createIpAccessList', 'replaceIpAccessList',
-            'deleteIpAccessList', 'createToken', 'deleteToken', 'workspaceConfEdit'
+            'deleteIpAccessList', 'createToken', 'deleteToken'
           )
         )
       warehouse_id: ${var.warehouse_id}

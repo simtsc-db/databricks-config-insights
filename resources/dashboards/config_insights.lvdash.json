@@ -18,7 +18,7 @@
     {
       "name": "drift_attributed_ds",
       "displayName": "Drift attribution",
-      "query": "SELECT change_date, setting_name, workspace_name, category, change_type, previous_value, new_value, changed_by, changed_at, action_name, attribution_status, COALESCE(changed_by, CASE attribution_status WHEN 'AUDIT_NOT_ACCESSIBLE' THEN 'actor unknown — audit log not accessible (needs SELECT on system.access)' WHEN 'ACCOUNT_AUDIT_UNAVAILABLE' THEN 'actor unknown — account audit not enabled' ELSE 'actor unknown — no matching audit event' END) AS changed_by_display, detected_at FROM settings_drift_attributed ORDER BY detected_at DESC"
+      "query": "SELECT change_date, setting_name, workspace_name, category, change_type, previous_value, new_value, changed_by, changed_at, action_name, attribution_status, COALESCE(changed_by, CASE attribution_status WHEN 'AUDIT_NOT_ACCESSIBLE' THEN '— actor unknown: audit log not accessible (needs SELECT on system.access)' WHEN 'ACCOUNT_AUDIT_UNAVAILABLE' THEN '— actor unknown: account audit not enabled' WHEN 'ATTRIBUTED_ACTOR_UNKNOWN' THEN '— actor unknown: audit event matched but no user identity' ELSE '— actor unknown: no matching audit event' END) AS changed_by_display, detected_at FROM settings_drift_attributed ORDER BY detected_at DESC"
     },
     {
       "name": "consistency_ds",

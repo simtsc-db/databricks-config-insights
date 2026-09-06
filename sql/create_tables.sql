@@ -272,9 +272,14 @@ WHEN NOT MATCHED THEN INSERT *;
 -- detected_at] via ROW_NUMBER() over event_time DESC. Workspace-scoped drift
 -- (workspace_id > 0) joins on workspace_id; account-scoped drift (workspace_id =
 -- 0) joins on account-level events (workspace_id = 0). setting_action_map
--- tightens the match when a mapping exists. Every drift row is preserved (LEFT
--- JOIN) -- a lack of match yields NULL actor + attribution_status NO_AUDIT_MATCH,
--- never a dropped row. This is CORRELATION, not proof.
+-- tightens the match when a mapping exists; UNMAPPED settings fall back to a
+-- workspace time-window match RESTRICTED to config-CHANGE (mutation) actions, so
+-- a later read/list event cannot be mis-attributed as the change. Every drift
+-- row is preserved (LEFT JOIN) -- a lack of match yields NULL actor +
+-- attribution_status NO_AUDIT_MATCH, never a dropped row. attribution_status is
+-- one of: ATTRIBUTED (event matched, actor known), ATTRIBUTED_ACTOR_UNKNOWN
+-- (event matched but user_identity.email NULL), NO_AUDIT_MATCH,
+-- AUDIT_NOT_ACCESSIBLE, ACCOUNT_AUDIT_UNAVAILABLE. This is CORRELATION, not proof.
 --
 -- When audit is not accessible, the collector instead creates a DEGRADED view:
 --   SELECT change_date, setting_name, workspace_id, workspace_name, scope,
@@ -308,7 +313,14 @@ ranked AS (
         AND a.event_time > d.previous_collected_at
         AND a.event_time <= d.detected_at
         AND (
-            m.action_name IS NULL
+            -- No mapping: workspace time-window match, RESTRICTED to config-CHANGE
+            -- (mutation) actions so a later successful read/list event in the
+            -- window cannot outrank (and steal attribution from) the real change.
+            (m.action_name IS NULL AND (
+                lower(a.action_name) RLIKE '^(create|update|replace|delete|set|add|remove|insert|put|patch|enable|disable|change|edit|grant|revoke|assign|unassign|rotate|generate|register|deregister|attach|detach|move|rename|transfer|reset|upsert)'
+                OR lower(a.action_name) LIKE '%edit'
+            ))
+            -- Mapping exists: tighten to the mapped action (+ service).
             OR (a.action_name = m.action_name
                 AND (m.service_name IS NULL OR a.service_name = m.service_name))
         )
@@ -318,7 +330,11 @@ SELECT change_date, setting_name, workspace_id, workspace_name, scope, account_i
        CASE WHEN rn = 1 THEN actor_email END AS changed_by,
        CASE WHEN rn = 1 THEN audit_event_time END AS changed_at,
        CASE WHEN rn = 1 THEN audit_action_name END AS action_name,
-       CASE WHEN rn = 1 AND actor_email IS NOT NULL THEN 'ATTRIBUTED'
+       -- Distinguish EVENT existence from ACTOR availability: a matched config
+       -- event with no actor email is ATTRIBUTED_ACTOR_UNKNOWN (we know a change
+       -- happened in-window, we just can't name who), NOT NO_AUDIT_MATCH.
+       CASE WHEN rn = 1 AND audit_event_time IS NOT NULL AND actor_email IS NOT NULL THEN 'ATTRIBUTED'
+            WHEN rn = 1 AND audit_event_time IS NOT NULL AND actor_email IS NULL THEN 'ATTRIBUTED_ACTOR_UNKNOWN'
             ELSE 'NO_AUDIT_MATCH' END AS attribution_status
 FROM ranked
 WHERE rn = 1;

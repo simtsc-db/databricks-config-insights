@@ -340,16 +340,17 @@ Unity Catalog audit log (`system.access.audit`) and adds a best-effort actor.
 | Object | Purpose |
 |---|---|
 | `settings_drift` (+`workspace_id`, `scope`, `account_id`, `previous_collected_at`) | Drift now carries the keys the audit join needs. |
-| `setting_action_map` (table) | Optional `setting_name → service_name/action_name/request_param_key` bridge. **Tightens** matches when a mapping exists; otherwise a workspace time-window match is used. Seeded with illustrative well-known bridges (IP access lists, tokens, `workspaceConfEdit`). |
+| `setting_action_map` (table) | Optional `setting_name → service_name/action_name/request_param_key` bridge. **Tightens** matches when a mapping exists; **unmapped** settings fall back to a workspace time-window match **restricted to config-CHANGE (mutation) actions** (so a later read/list event can't be mis-attributed). Seeded with illustrative well-known bridges (IP access lists, tokens, `workspaceConfEdit`). |
 | `settings_drift_attributed` (view) | Every drift row **plus** nullable `changed_by` (`user_identity.email`), `changed_at` (`event_time`), `action_name`, and `attribution_status`. |
-| `security_setting_changed_attributed` (alert) | Emails when an **attributed** change hits a security/governance-relevant setting (governance category or a known security action). |
+| `security_setting_changed_attributed` (alert) | Emails when an **attributed** change hits a security-relevant setting — the governance/security category, or an inherently security-sensitive audit action (IP access list / token mutations). Generic `workspaceConfEdit` alone does **not** trigger it. |
 
 `attribution_status` is one of:
 
 | Value | Meaning |
 |---|---|
-| `ATTRIBUTED` | A matching audit event was found; `changed_by` is populated. |
-| `NO_AUDIT_MATCH` | Audit is readable, but no event matched the change-window/action. |
+| `ATTRIBUTED` | A matching config-change audit event was found and `changed_by` is populated. |
+| `ATTRIBUTED_ACTOR_UNKNOWN` | A matching config-change event was found in-window, but it carried no `user_identity.email`, so the actor can't be named (`changed_by` is NULL). Distinct from `NO_AUDIT_MATCH`: a change *was* observed. |
+| `NO_AUDIT_MATCH` | Audit is readable, but no config-change event matched the change-window/action. |
 | `AUDIT_NOT_ACCESSIBLE` | The deployment lacks `SELECT` on `system.access` (see grants below). |
 | `ACCOUNT_AUDIT_UNAVAILABLE` | The audit system schema is not enabled / not found. |
 
