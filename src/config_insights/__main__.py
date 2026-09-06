@@ -188,6 +188,10 @@ def main() -> int:
         create_latest_snapshot_view,
         create_pivot_view,
         create_drift_view,
+        probe_audit_access,
+        ensure_setting_action_map,
+        create_drift_attributed_view,
+        ATTR_NOT_ACCESSIBLE,
     )
 
     spark = SparkSession.builder.getOrCreate()
@@ -214,6 +218,32 @@ def main() -> int:
     create_latest_snapshot_view(spark, table_name, view_latest, map_table)
     create_pivot_view(spark, table_name, view_comparison, map_table)
     create_drift_view(spark, table_name, view_drift, map_table)
+
+    # Actor attribution ("who changed it"): correlate each drift row with the
+    # Unity Catalog audit log (system.access.audit). This is best-effort and
+    # MUST NOT fail the job -- if audit is inaccessible we still build
+    # settings_drift_attributed with NULL actor + an explanatory
+    # attribution_status. Mirrors the graceful account/ai_classify fallbacks.
+    action_map_table = f"{catalog}.{schema}.setting_action_map"
+    view_drift_attr = f"{catalog}.{schema}.settings_drift_attributed"
+    try:
+        audit_mode = probe_audit_access(spark)
+        ensure_setting_action_map(spark, action_map_table)
+        create_drift_attributed_view(
+            spark, view_drift, action_map_table, view_drift_attr, audit_mode
+        )
+    except Exception as e:  # noqa: BLE001 - attribution is best-effort
+        logger.warning(
+            "Attribution enrichment failed (%s). Building degraded "
+            "settings_drift_attributed with NULL actor.", e,
+        )
+        try:
+            create_drift_attributed_view(
+                spark, view_drift, action_map_table, view_drift_attr,
+                ATTR_NOT_ACCESSIBLE,
+            )
+        except Exception as e2:  # noqa: BLE001
+            logger.warning("Could not build degraded attributed view: %s", e2)
 
     logger.info("Collection complete: %d settings written to %s", len(records), table_name)
 

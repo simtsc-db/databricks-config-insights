@@ -1,0 +1,55 @@
+resources:
+  alerts:
+    security_setting_changed_attributed:
+      display_name: "[${bundle.target}] Security Setting Changed (attributed)"
+      # Fires when a security/governance-relevant setting drifts in the latest
+      # collection run AND the change could be attributed to an actor via the
+      # Unity Catalog audit log (system.access.audit). Reads the
+      # settings_drift_attributed view (single source of attribution logic:
+      # nearest-preceding successful audit event in the snapshot change-window,
+      # correlation NOT proof). "Security-relevant" = the governance category OR
+      # a known security-sensitive audit action_name (IP access lists, tokens).
+      # The `changes` column lists exactly what changed and who. Requires SELECT
+      # on system.access; without it changed_by is NULL and this alert stays
+      # quiet (attribution_status <> 'ATTRIBUTED'). Always returns one row.
+      query_text: |
+        SELECT
+          COUNT(*) AS security_changes,
+          COALESCE(array_join(collect_list(
+            concat(setting_name, ' [', COALESCE(workspace_name, '-'), ']: ', change_type,
+                   ' (', COALESCE(previous_value, '(none)'), ' -> ',
+                   COALESCE(new_value, '(none)'), ') by ', COALESCE(changed_by, '(unknown)'),
+                   COALESCE(concat(' via ', action_name), ''))
+          ), '; '), '') AS changes
+        FROM ${var.catalog}.${var.schema}.settings_drift_attributed
+        WHERE detected_at = (
+          SELECT MAX(collected_at) FROM ${var.catalog}.${var.schema}.settings_history
+        )
+        AND attribution_status = 'ATTRIBUTED'
+        AND (
+          LOWER(category) IN ('governance', 'security')
+          OR action_name IN (
+            'updateIpAccessList', 'createIpAccessList', 'replaceIpAccessList',
+            'deleteIpAccessList', 'createToken', 'deleteToken', 'workspaceConfEdit'
+          )
+        )
+      warehouse_id: ${var.warehouse_id}
+      evaluation:
+        comparison_operator: "GREATER_THAN"
+        source:
+          name: "security_changes"
+          display: "security_changes"
+        threshold:
+          value:
+            double_value: 0
+        notification:
+          notify_on_ok: false
+          subscriptions:
+            - user_email: "${workspace.current_user.userName}"
+      schedule:
+        pause_status: "UNPAUSED"
+        quartz_cron_schedule: "0 0 7 * * ?"
+        timezone_id: "UTC"
+      permissions:
+        - level: CAN_RUN
+          group_name: "users"

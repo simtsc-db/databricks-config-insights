@@ -6,11 +6,13 @@
 -- Tables use schema evolution: new fields from the API are added automatically.
 --
 -- Data model (single source of truth per concern):
---   settings_history      append-only snapshot log (one row per setting per run)
---   setting_category_map  setting_name -> functional category (from ai_classify)
---   settings_latest       enriched current state (category from the map, is_preview, status)
---   settings_drift        value_changed / added / removed vs the previous snapshot
---   workspace_comparison  cross-workspace consistency
+--   settings_history          append-only snapshot log (one row per setting per run)
+--   setting_category_map      setting_name -> functional category (from ai_classify)
+--   setting_action_map        setting_name -> audit service/action bridge (attribution)
+--   settings_latest           enriched current state (category from the map, is_preview, status)
+--   settings_drift            value_changed / added / removed vs the previous snapshot
+--   settings_drift_attributed drift rows + best-effort actor from system.access.audit
+--   workspace_comparison      cross-workspace consistency
 -- Category is resolved from setting_category_map in every view, so it never
 -- goes stale on old snapshots.
 
@@ -155,19 +157,24 @@ grid AS (
 ),
 obs AS (
     SELECT setting_name, COALESCE(workspace_id, 0) AS ws, collected_at,
-           MAX(setting_value) AS setting_value, MAX(workspace_name) AS workspace_name
+           MAX(setting_value) AS setting_value, MAX(workspace_name) AS workspace_name,
+           MAX(scope) AS scope, MAX(account_id) AS account_id
     FROM main.config_insights.settings_history
     GROUP BY setting_name, COALESCE(workspace_id, 0), collected_at
 ),
 matrix AS (
-    SELECT g.setting_name, g.ws, g.collected_at, g.seq, o.setting_value, o.workspace_name
+    SELECT g.setting_name, g.ws, g.collected_at, g.seq, o.setting_value, o.workspace_name,
+           o.scope, o.account_id
     FROM grid g
     LEFT JOIN obs o ON g.setting_name = o.setting_name AND g.ws = o.ws AND g.collected_at = o.collected_at
 ),
 lagged AS (
-    SELECT setting_name, ws, collected_at, seq, setting_value, workspace_name,
+    SELECT setting_name, ws, collected_at, seq, setting_value, workspace_name, scope, account_id,
            LAG(setting_value) OVER (PARTITION BY setting_name, ws ORDER BY seq) AS prev_value,
-           LAG(workspace_name) OVER (PARTITION BY setting_name, ws ORDER BY seq) AS prev_ws_name
+           LAG(workspace_name) OVER (PARTITION BY setting_name, ws ORDER BY seq) AS prev_ws_name,
+           LAG(scope) OVER (PARTITION BY setting_name, ws ORDER BY seq) AS prev_scope,
+           LAG(account_id) OVER (PARTITION BY setting_name, ws ORDER BY seq) AS prev_account_id,
+           LAG(collected_at) OVER (PARTITION BY setting_name, ws ORDER BY seq) AS prev_collected_at
     FROM matrix
 ),
 cur_cat AS (
@@ -177,8 +184,14 @@ cur_cat AS (
         FROM main.config_insights.setting_category_map
     ) WHERE rn = 1
 )
+-- ws = COALESCE(workspace_id, 0); 0 marks account-scoped drift, which the audit
+-- join matches to account-level events (workspace_id = 0). previous_collected_at
+-- is the start of the snapshot change-window used for attribution.
 SELECT DATE(l.collected_at) AS change_date, l.setting_name,
+       l.ws AS workspace_id,
        COALESCE(l.workspace_name, l.prev_ws_name) AS workspace_name,
+       COALESCE(l.scope, l.prev_scope) AS scope,
+       COALESCE(l.account_id, l.prev_account_id) AS account_id,
        cc.category AS category,
        CASE
            WHEN l.prev_value IS NULL AND l.setting_value IS NOT NULL
@@ -187,7 +200,8 @@ SELECT DATE(l.collected_at) AS change_date, l.setting_name,
                 AND l.setting_value IS NULL THEN 'removed'
            ELSE 'value_changed'
        END AS change_type,
-       l.prev_value AS previous_value, l.setting_value AS new_value, l.collected_at AS detected_at
+       l.prev_value AS previous_value, l.setting_value AS new_value,
+       l.prev_collected_at AS previous_collected_at, l.collected_at AS detected_at
 FROM lagged l
 LEFT JOIN cur_cat cc ON cc.setting_name = l.setting_name
 WHERE l.seq > 1 AND (
@@ -199,3 +213,112 @@ WHERE l.seq > 1 AND (
     OR (l.prev_value IS NOT NULL AND l.prev_value NOT IN ('<unavailable>', '<null>', '<not-set>')
         AND l.setting_value IS NULL)
 );
+
+-- ===========================================================================
+-- Attribution: "who made a configuration change"
+--
+-- The Settings V2 API carries no actor. Attribution is joined in FROM the Unity
+-- Catalog audit system table system.access.audit BY CORRELATION -- it is
+-- best-effort, NOT proof. Reading system.access.audit requires a UC SELECT
+-- grant on schema system.access (grantable by a metastore admin; INDEPENDENT of
+-- account-admin status):
+--     GRANT USE CATALOG ON CATALOG system TO `<principal>`;
+--     GRANT USE SCHEMA  ON SCHEMA  system.access TO `<principal>`;
+--     GRANT SELECT      ON SCHEMA  system.access TO `<principal>`;
+-- Account-level events carry workspace_id = 0; retention ~365d; ingestion lags
+-- minutes-to-hours. The collector probes access at runtime and, if audit is
+-- inaccessible, builds a DEGRADED settings_drift_attributed (NULL actor + an
+-- attribution_status of AUDIT_NOT_ACCESSIBLE or ACCOUNT_AUDIT_UNAVAILABLE) so
+-- the object always exists.
+-- ===========================================================================
+
+-- Optional bridge table: setting_name -> audit service/action. TIGHTENS
+-- attribution when a mapping exists; otherwise a workspace time-window match is
+-- used. WARNING: action_name / request_params keys are VERSION-SENSITIVE -- the
+-- seeds are illustrative and MUST be validated against real events.
+CREATE TABLE IF NOT EXISTS main.config_insights.setting_action_map (
+    setting_name STRING
+        COMMENT 'Settings V2 key (or setting family) this bridge applies to',
+    service_name STRING
+        COMMENT 'audit.service_name that a change to this setting produces',
+    action_name STRING
+        COMMENT 'audit.action_name that a change to this setting produces',
+    request_param_key STRING
+        COMMENT 'request_params key carrying the target (for manual verification)'
+)
+USING DELTA
+COMMENT 'setting_name -> audit service/action bridge. Tightens attribution. VERSION-SENSITIVE: validate against real events.';
+
+-- Illustrative well-known bridges (validate against your account's real events).
+MERGE INTO main.config_insights.setting_action_map t
+USING (
+    SELECT * FROM VALUES
+        ('enableIpAccessLists', 'ipAccessLists', 'updateIpAccessList',  'ipAccessListId'),
+        ('enableIpAccessLists', 'ipAccessLists', 'createIpAccessList',  'ipAccessListId'),
+        ('enableIpAccessLists', 'ipAccessLists', 'replaceIpAccessList', 'ipAccessListId'),
+        ('maxTokenLifetimeDays', 'tokens', 'createToken', 'tokenId'),
+        ('maxTokenLifetimeDays', 'tokens', 'deleteToken', 'tokenId'),
+        ('enableTokensConfig',   'tokens', 'createToken', 'tokenId'),
+        ('enableProjectTypeInWorkspace', 'workspace', 'workspaceConfEdit', 'workspaceConfKeys'),
+        ('enableExportNotebook',         'workspace', 'workspaceConfEdit', 'workspaceConfKeys')
+    AS v(setting_name, service_name, action_name, request_param_key)
+) s
+ON t.setting_name = s.setting_name AND t.action_name = s.action_name
+WHEN NOT MATCHED THEN INSERT *;
+
+-- View: Drift + best-effort actor attribution (ACCESSIBLE form shown here).
+-- For each drift row, pick the NEAREST-PRECEDING successful config-related audit
+-- event for that workspace inside the change-window (previous_collected_at,
+-- detected_at] via ROW_NUMBER() over event_time DESC. Workspace-scoped drift
+-- (workspace_id > 0) joins on workspace_id; account-scoped drift (workspace_id =
+-- 0) joins on account-level events (workspace_id = 0). setting_action_map
+-- tightens the match when a mapping exists. Every drift row is preserved (LEFT
+-- JOIN) -- a lack of match yields NULL actor + attribution_status NO_AUDIT_MATCH,
+-- never a dropped row. This is CORRELATION, not proof.
+--
+-- When audit is not accessible, the collector instead creates a DEGRADED view:
+--   SELECT change_date, setting_name, workspace_id, workspace_name, scope,
+--          account_id, category, change_type, previous_value, new_value,
+--          previous_collected_at, detected_at,
+--          CAST(NULL AS STRING) AS changed_by, CAST(NULL AS TIMESTAMP) AS changed_at,
+--          CAST(NULL AS STRING) AS action_name,
+--          'AUDIT_NOT_ACCESSIBLE' AS attribution_status   -- or ACCOUNT_AUDIT_UNAVAILABLE
+--   FROM main.config_insights.settings_drift;
+CREATE OR REPLACE VIEW main.config_insights.settings_drift_attributed AS
+WITH audit_events AS (
+    SELECT event_time, COALESCE(workspace_id, 0) AS ws, account_id,
+           service_name, action_name, user_identity.email AS actor_email
+    FROM system.access.audit
+    WHERE response.status_code = 200
+      AND service_name IN ('workspace', 'accounts', 'unityCatalog', 'ipAccessLists',
+                           'tokens', 'settings', 'settingsV2', 'featureStore', 'clusterPolicies')
+),
+ranked AS (
+    SELECT d.*,
+           a.actor_email, a.event_time AS audit_event_time, a.action_name AS audit_action_name,
+           ROW_NUMBER() OVER (
+               PARTITION BY d.setting_name, d.workspace_id, d.detected_at
+               ORDER BY a.event_time DESC
+           ) AS rn
+    FROM main.config_insights.settings_drift d
+    LEFT JOIN main.config_insights.setting_action_map m ON m.setting_name = d.setting_name
+    LEFT JOIN audit_events a
+        ON a.ws = d.workspace_id
+        AND d.previous_collected_at IS NOT NULL
+        AND a.event_time > d.previous_collected_at
+        AND a.event_time <= d.detected_at
+        AND (
+            m.action_name IS NULL
+            OR (a.action_name = m.action_name
+                AND (m.service_name IS NULL OR a.service_name = m.service_name))
+        )
+)
+SELECT change_date, setting_name, workspace_id, workspace_name, scope, account_id,
+       category, change_type, previous_value, new_value, previous_collected_at, detected_at,
+       CASE WHEN rn = 1 THEN actor_email END AS changed_by,
+       CASE WHEN rn = 1 THEN audit_event_time END AS changed_at,
+       CASE WHEN rn = 1 THEN audit_action_name END AS action_name,
+       CASE WHEN rn = 1 AND actor_email IS NOT NULL THEN 'ATTRIBUTED'
+            ELSE 'NO_AUDIT_MATCH' END AS attribution_status
+FROM ranked
+WHERE rn = 1;

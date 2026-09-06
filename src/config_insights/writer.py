@@ -216,6 +216,11 @@ def create_drift_view(
     treated as "no reliable value", so a flip to/from a sentinel is not drift.
     Category comes from the category map. Powers the Drift page and the
     drift_detected alert (which filters to the latest run).
+
+    Also exposes ``workspace_id`` (0 for account-scoped drift), ``scope``,
+    ``account_id`` and ``previous_collected_at`` so ``settings_drift_attributed``
+    can correlate each change to an audit event within the snapshot
+    change-window ``(previous_collected_at, detected_at]``.
     """
     spark.sql(f"""
         CREATE OR REPLACE VIEW {view_name} AS
@@ -234,30 +239,44 @@ def create_drift_view(
         obs AS (
             SELECT setting_name, COALESCE(workspace_id, 0) AS ws, collected_at,
                    MAX(setting_value) AS setting_value,
-                   MAX(workspace_name) AS workspace_name
+                   MAX(workspace_name) AS workspace_name,
+                   MAX(scope) AS scope,
+                   MAX(account_id) AS account_id
             FROM {table_name}
             GROUP BY setting_name, COALESCE(workspace_id, 0), collected_at
         ),
         matrix AS (
             SELECT g.setting_name, g.ws, g.collected_at, g.seq,
-                   o.setting_value, o.workspace_name
+                   o.setting_value, o.workspace_name, o.scope, o.account_id
             FROM grid g
             LEFT JOIN obs o ON g.setting_name = o.setting_name
                 AND g.ws = o.ws AND g.collected_at = o.collected_at
         ),
         lagged AS (
             SELECT setting_name, ws, collected_at, seq, setting_value, workspace_name,
+                   scope, account_id,
                    LAG(setting_value) OVER (
                        PARTITION BY setting_name, ws ORDER BY seq) AS prev_value,
                    LAG(workspace_name) OVER (
-                       PARTITION BY setting_name, ws ORDER BY seq) AS prev_ws_name
+                       PARTITION BY setting_name, ws ORDER BY seq) AS prev_ws_name,
+                   LAG(scope) OVER (
+                       PARTITION BY setting_name, ws ORDER BY seq) AS prev_scope,
+                   LAG(account_id) OVER (
+                       PARTITION BY setting_name, ws ORDER BY seq) AS prev_account_id,
+                   LAG(collected_at) OVER (
+                       PARTITION BY setting_name, ws ORDER BY seq) AS prev_collected_at
             FROM matrix
         ),
         {_current_category_cte(map_table)}
         SELECT
             DATE(l.collected_at) AS change_date,
             l.setting_name,
+            -- ws is COALESCE(workspace_id, 0); 0 marks account-scoped drift, which
+            -- the audit join matches to account-level events (workspace_id = 0).
+            l.ws AS workspace_id,
             COALESCE(l.workspace_name, l.prev_ws_name) AS workspace_name,
+            COALESCE(l.scope, l.prev_scope) AS scope,
+            COALESCE(l.account_id, l.prev_account_id) AS account_id,
             cc.category AS category,
             CASE
                 WHEN l.prev_value IS NULL AND l.setting_value IS NOT NULL
@@ -268,6 +287,9 @@ def create_drift_view(
             END AS change_type,
             l.prev_value AS previous_value,
             l.setting_value AS new_value,
+            -- Start of the snapshot change-window: the previous run's timestamp.
+            -- Attribution searches audit events in (previous_collected_at, detected_at].
+            l.prev_collected_at AS previous_collected_at,
             l.collected_at AS detected_at
         FROM lagged l
         LEFT JOIN cur_cat cc ON cc.setting_name = l.setting_name
@@ -282,3 +304,277 @@ def create_drift_view(
         )
     """)
     logger.info("Created drift view: %s", view_name)
+
+
+# --------------------------------------------------------------------------- #
+# Attribution: "who made a configuration change".
+#
+# The Settings V2 API carries no actor. Attribution is joined in from the Unity
+# Catalog audit system table system.access.audit BY CORRELATION -- for each
+# drift row we pick the nearest-preceding successful config-related audit event
+# for that workspace inside the snapshot change-window. It is a best-effort
+# correlation, NOT proof: many actors and API calls can touch a workspace inside
+# one collection interval, and audit ingestion lags minutes-to-hours. Never drop
+# a drift row for lack of a match -- unmatched rows are labelled, not removed.
+# --------------------------------------------------------------------------- #
+
+AUDIT_TABLE = "system.access.audit"
+
+# Attribution status enum (also surfaced on the dashboard/alert).
+ATTR_ATTRIBUTED = "ATTRIBUTED"                        # a matching audit event was found
+ATTR_NO_AUDIT_MATCH = "NO_AUDIT_MATCH"                # audit readable, but no event matched
+ATTR_NOT_ACCESSIBLE = "AUDIT_NOT_ACCESSIBLE"          # missing SELECT on system.access
+ATTR_ACCOUNT_UNAVAILABLE = "ACCOUNT_AUDIT_UNAVAILABLE"  # audit schema not enabled / not found
+
+# Audit modes returned by the probe -> attribution behaviour.
+AUDIT_MODE_ACCESSIBLE = "ACCESSIBLE"
+
+# Coarse pre-filter for config-related audit events. Kept deliberately broad
+# (surfaces that carry configuration changes); setting_action_map TIGHTENS this
+# per-setting when a mapping exists. These service/action names are
+# VERSION-SENSITIVE and must be validated against real events in your account.
+_CONFIG_AUDIT_SERVICES = (
+    "('workspace', 'accounts', 'unityCatalog', 'ipAccessLists', "
+    "'tokens', 'settings', 'settingsV2', 'featureStore', 'clusterPolicies')"
+)
+
+
+def probe_audit_access(spark: SparkSession) -> str:
+    """Cheap, bounded probe of read access to ``system.access.audit``.
+
+    Returns one of ``AUDIT_MODE_ACCESSIBLE`` / ``ATTR_NOT_ACCESSIBLE`` /
+    ``ATTR_ACCOUNT_UNAVAILABLE``. Never raises: any unexpected failure degrades
+    to ``ATTR_NOT_ACCESSIBLE`` so the collector job can still build a (degraded)
+    attributed view instead of failing.
+
+    Distinguishes a permission problem (a SELECT grant on schema
+    ``system.access`` is missing -- grantable by a metastore admin, independent
+    of account-admin status) from the audit schema not being enabled at all
+    (table/schema not found).
+    """
+    try:
+        spark.sql(
+            f"SELECT 1 FROM {AUDIT_TABLE} "
+            "WHERE event_date >= current_date() LIMIT 1"
+        ).collect()
+        logger.info("Audit probe: %s is readable", AUDIT_TABLE)
+        return AUDIT_MODE_ACCESSIBLE
+    except Exception as e:  # noqa: BLE001 - must never fail the job
+        msg = str(e).upper()
+        not_found_markers = (
+            "TABLE_OR_VIEW_NOT_FOUND",
+            "SCHEMA_NOT_FOUND",
+            "NAMESPACE_NOT_FOUND",
+            "DOES NOT EXIST",
+            "CANNOT BE FOUND",
+            "NOT FOUND",
+        )
+        perm_markers = (
+            "PERMISSION",
+            "INSUFFICIENT_PRIVILEGES",
+            "INSUFFICIENT PRIVILEGES",
+            "ACCESS DENIED",
+            "NOT AUTHORIZED",
+            "REQUIRES",
+            "UNAUTHORIZED",
+        )
+        if any(m in msg for m in not_found_markers):
+            logger.warning(
+                "Audit probe: %s not found -> audit schema not enabled (%s)",
+                AUDIT_TABLE, e,
+            )
+            return ATTR_ACCOUNT_UNAVAILABLE
+        if any(m in msg for m in perm_markers):
+            logger.warning(
+                "Audit probe: no SELECT on system.access (%s). Grant "
+                "USE CATALOG ON system, USE SCHEMA + SELECT ON SCHEMA "
+                "system.access (metastore admin) to enable attribution.",
+                e,
+            )
+            return ATTR_NOT_ACCESSIBLE
+        logger.warning(
+            "Audit probe failed unexpectedly (%s); degrading attribution to %s",
+            e, ATTR_NOT_ACCESSIBLE,
+        )
+        return ATTR_NOT_ACCESSIBLE
+
+
+def ensure_setting_action_map(spark: SparkSession, action_map_table: str) -> None:
+    """Create and seed the optional ``setting_action_map`` bridge table.
+
+    Maps a ``setting_name`` to the audit ``service_name`` / ``action_name``
+    (and the ``request_params`` key that carries the target) that a change to
+    that setting produces. Used only to TIGHTEN attribution: when a mapping
+    exists for a setting, only audit events with the mapped action_name are
+    considered; otherwise attribution falls back to a workspace time-window
+    match. Rows with no matching drift setting_name are simply never used, so an
+    inaccurate guess is harmless (it just never tightens).
+
+    WARNING: action_name / request_params keys are VERSION-SENSITIVE. The seeds
+    below are illustrative well-known bridges and MUST be validated against real
+    events in ``system.access.audit`` for your Databricks version before you
+    rely on them.
+    """
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {action_map_table} (
+            setting_name STRING
+                COMMENT 'Settings V2 key (or setting family) this bridge applies to',
+            service_name STRING
+                COMMENT 'audit.service_name that a change to this setting produces',
+            action_name STRING
+                COMMENT 'audit.action_name that a change to this setting produces',
+            request_param_key STRING
+                COMMENT 'request_params key carrying the target (for manual verification)'
+        ) USING delta
+        COMMENT 'setting_name -> audit service/action bridge. Tightens attribution. VERSION-SENSITIVE: validate against real events.'
+        """
+    )
+
+    # Idempotent seed of well-known bridges. These are EXAMPLES to be validated;
+    # setting_name values in particular vary by API version.
+    seeds = [
+        # IP access lists (workspace network config)
+        ("enableIpAccessLists", "ipAccessLists", "updateIpAccessList", "ipAccessListId"),
+        ("enableIpAccessLists", "ipAccessLists", "createIpAccessList", "ipAccessListId"),
+        ("enableIpAccessLists", "ipAccessLists", "replaceIpAccessList", "ipAccessListId"),
+        # Personal access tokens
+        ("maxTokenLifetimeDays", "tokens", "createToken", "tokenId"),
+        ("maxTokenLifetimeDays", "tokens", "deleteToken", "tokenId"),
+        ("enableTokensConfig", "tokens", "createToken", "tokenId"),
+        # Generic Settings V2 workspace toggles -> workspaceConfEdit
+        ("enableProjectTypeInWorkspace", "workspace", "workspaceConfEdit", "workspaceConfKeys"),
+        ("enableExportNotebook", "workspace", "workspaceConfEdit", "workspaceConfKeys"),
+    ]
+    values_sql = ",\n            ".join(
+        "('{}', '{}', '{}', '{}')".format(
+            s.replace("'", "''"), sv.replace("'", "''"),
+            a.replace("'", "''"), k.replace("'", "''"),
+        )
+        for s, sv, a, k in seeds
+    )
+    spark.sql(
+        f"""
+        MERGE INTO {action_map_table} t
+        USING (
+            SELECT * FROM VALUES
+            {values_sql}
+            AS v(setting_name, service_name, action_name, request_param_key)
+        ) s
+        ON t.setting_name = s.setting_name AND t.action_name = s.action_name
+        WHEN NOT MATCHED THEN INSERT *
+        """
+    )
+    logger.info("Ensured + seeded setting_action_map: %s", action_map_table)
+
+
+def create_drift_attributed_view(
+    spark: SparkSession,
+    drift_view: str,
+    action_map_table: str,
+    view_name: str,
+    audit_mode: str,
+) -> None:
+    """Create ``settings_drift_attributed``: drift rows + best-effort actor.
+
+    When ``audit_mode`` is ``ACCESSIBLE`` the view LEFT JOINs each drift row to
+    ``system.access.audit`` and, per (setting, workspace, snapshot), keeps the
+    NEAREST-PRECEDING successful (response.status_code = 200) config-related
+    event inside the change-window ``(previous_collected_at, detected_at]`` via
+    ROW_NUMBER() over event_time DESC. Workspace-scoped drift (workspace_id > 0)
+    joins on that workspace_id; account-scoped drift (workspace_id = 0) joins on
+    account-level events (workspace_id = 0). ``setting_action_map`` tightens the
+    match when a mapping exists; otherwise the time-window match is used.
+
+    When audit is NOT accessible the view degrades to the drift rows plus NULL
+    ``changed_by`` / ``changed_at`` / ``action_name`` and a constant
+    ``attribution_status`` (so the object always builds and the dashboard/alert
+    keep working). Every drift row is preserved regardless of match.
+
+    Attribution is correlation, NOT proof.
+    """
+    if audit_mode != AUDIT_MODE_ACCESSIBLE:
+        # Degraded form: never references system.access.audit, so it builds and
+        # queries fine without the grant. attribution_status explains why.
+        spark.sql(f"""
+            CREATE OR REPLACE VIEW {view_name} AS
+            -- Attribution unavailable ({audit_mode}); drift rows carry NULL actor.
+            -- Attribution is best-effort correlation with system.access.audit,
+            -- NOT proof of who made the change.
+            SELECT
+                change_date, setting_name, workspace_id, workspace_name, scope,
+                account_id, category, change_type, previous_value, new_value,
+                previous_collected_at, detected_at,
+                CAST(NULL AS STRING) AS changed_by,
+                CAST(NULL AS TIMESTAMP) AS changed_at,
+                CAST(NULL AS STRING) AS action_name,
+                '{audit_mode}' AS attribution_status
+            FROM {drift_view}
+        """)
+        logger.info(
+            "Created attributed view (degraded, status=%s): %s",
+            audit_mode, view_name,
+        )
+        return
+
+    spark.sql(f"""
+        CREATE OR REPLACE VIEW {view_name} AS
+        -- Attribution is best-effort CORRELATION with system.access.audit, NOT
+        -- proof: for each drift row we pick the nearest-preceding successful
+        -- config-related audit event for that workspace inside the change-window
+        -- (previous_collected_at, detected_at]. setting_action_map tightens the
+        -- match when a mapping exists; otherwise a workspace time-window match is
+        -- used. Every drift row is preserved (LEFT JOIN); no match -> NULL actor.
+        WITH audit_events AS (
+            SELECT
+                event_time,
+                COALESCE(workspace_id, 0) AS ws,
+                account_id,
+                service_name,
+                action_name,
+                user_identity.email AS actor_email
+            FROM {AUDIT_TABLE}
+            WHERE response.status_code = 200
+              AND service_name IN {_CONFIG_AUDIT_SERVICES}
+        ),
+        ranked AS (
+            SELECT
+                d.*,
+                a.actor_email, a.event_time AS audit_event_time,
+                a.action_name AS audit_action_name,
+                ROW_NUMBER() OVER (
+                    PARTITION BY d.setting_name, d.workspace_id, d.detected_at
+                    ORDER BY a.event_time DESC
+                ) AS rn
+            FROM {drift_view} d
+            LEFT JOIN {action_map_table} m
+                ON m.setting_name = d.setting_name
+            LEFT JOIN audit_events a
+                ON a.ws = d.workspace_id
+                AND d.previous_collected_at IS NOT NULL
+                AND a.event_time > d.previous_collected_at
+                AND a.event_time <= d.detected_at
+                AND (
+                    -- No mapping for this setting: workspace time-window match.
+                    m.action_name IS NULL
+                    -- Mapping exists: tighten to the mapped action (+ service).
+                    OR (a.action_name = m.action_name
+                        AND (m.service_name IS NULL
+                             OR a.service_name = m.service_name))
+                )
+        )
+        SELECT
+            change_date, setting_name, workspace_id, workspace_name, scope,
+            account_id, category, change_type, previous_value, new_value,
+            previous_collected_at, detected_at,
+            CASE WHEN rn = 1 THEN actor_email END AS changed_by,
+            CASE WHEN rn = 1 THEN audit_event_time END AS changed_at,
+            CASE WHEN rn = 1 THEN audit_action_name END AS action_name,
+            CASE
+                WHEN rn = 1 AND actor_email IS NOT NULL THEN '{ATTR_ATTRIBUTED}'
+                ELSE '{ATTR_NO_AUDIT_MATCH}'
+            END AS attribution_status
+        FROM ranked
+        WHERE rn = 1
+    """)
+    logger.info("Created attributed view (audit accessible): %s", view_name)
