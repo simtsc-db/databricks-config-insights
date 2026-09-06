@@ -50,6 +50,12 @@ targets:
     mode: production
     presets:
       name_prefix: ''
+    # The fevm-sg-pubsec production workspace stores its settings tables and
+    # views in a dedicated Unity Catalog, not the bundle-level `main` default.
+    # Overriding the variable here (rather than the top-level default) keeps
+    # dev on `main` and only redirects prod.
+    variables:
+      catalog: sg_pubsec_catalog
     # Production mode requires an explicit, stable root path so only one copy
     # is ever deployed. Point this at a shared or service-principal location.
     workspace:
