@@ -48,6 +48,8 @@ targets:
   # Shared / production deployment. Runs the collector as a service principal.
   prod:
     mode: production
+    presets:
+      name_prefix: ''
     # Production mode requires an explicit, stable root path so only one copy
     # is ever deployed. Point this at a shared or service-principal location.
     workspace:

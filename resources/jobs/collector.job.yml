@@ -1,7 +1,7 @@
 resources:
   jobs:
     config_collector:
-      name: "[${bundle.target}] Config Insights - Collector"
+      name: "Config Insights - Collector"
       description: >
         Dynamically discovers and collects all account and workspace settings
         via the Settings V2 metadata API. Writes to Delta with schema evolution;
