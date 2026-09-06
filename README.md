@@ -20,7 +20,8 @@ laptop.
 | **Preview feature tracking** | Settings carry a `preview_phase` (`PRIVATE_PREVIEW`, `BETA`, `PUBLIC_PREVIEW`, …). Previews are surfaced automatically with a dedicated enabled/disabled section. Preview is a *lifecycle* dimension, kept separate from the functional category. |
 | **Schema evolution** | The Delta table is written with `mergeSchema=true`, so new metadata fields added by Databricks appear as new columns with no DDL changes. |
 | **Change detection** | The `settings_drift` view classifies every change as **value_changed**, **added**, or **removed** (unreadable sentinel values are ignored) — so settings that appear or disappear from the Settings V2 API are caught too, not just value flips. One view powers both the Configuration Drift page and the `drift_detected` alert. |
-| **Alerting** | Two SQL alerts fire on config drift and newly enabled preview features, and list **exactly what changed** in the notification body. |
+| **Alerting** | SQL alerts fire on config drift, newly enabled preview features, and **attributed** changes to security-relevant settings, listing **exactly what changed** (and who, when attributable) in the notification body. |
+| **Actor attribution** | The `settings_drift_attributed` view correlates each drift row with the Unity Catalog audit log (`system.access.audit`) to surface a best-effort `changed_by` — *correlation, not proof*. Degrades gracefully (NULL actor + `attribution_status`) when audit is not accessible. See [Attributing changes to an actor](#attributing-changes-to-an-actor-who-changed-it). |
 | **Zero maintenance** | New settings/previews added by Databricks are captured on the next run; deprecated ones simply stop appearing. |
 
 ---
@@ -64,15 +65,19 @@ cross-workspace consistency.
 │  Delta: <catalog>.<schema>.settings_history   (schema-evolving)            │
 │    collected_at │ scope │ workspace │ setting_name │ setting_value │ …      │
 │  + setting_category_map  (setting_name -> category, via ai_classify)       │
-│  Views: settings_latest · settings_drift · workspace_comparison            │
+│  + setting_action_map    (setting_name -> audit service/action bridge)     │
+│  Views: settings_latest · settings_drift · settings_drift_attributed       │
+│         · workspace_comparison                                             │
 └───────────────────────────────────┬───────────────────────────────────────┘
-                                     │  exact snapshot-to-snapshot SQL
-                                     │  (value_changed / added / removed)
+                                     │  exact snapshot-to-snapshot SQL         │
+                                     │  (value_changed / added / removed)      │
+                                     │  + best-effort actor join to            │
+                                     │    system.access.audit (correlation)    │
                                      ▼
 ┌───────────────────────────────────────────────────────────────────────────┐
-│  AI/BI Dashboard (2 pages)      +      2 SQL Alerts                         │
-│    Overview & Previews                 drift · new-preview                  │
-│    Config Drift                                                             │
+│  AI/BI Dashboard (2 pages)      +      3 SQL Alerts                         │
+│    Overview & Previews                 drift · new-preview ·                │
+│    Config Drift (+ attribution)        attributed security change           │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -92,7 +97,8 @@ databricks-config-insights/
 │   │   ├── config_insights.dashboard.yml   # AI/BI dashboard resource
 │   │   └── config_insights.lvdash.json     # Dashboard definition (2 pages)
 │   └── alerts/
-│       └── config_alerts.yml           # 2 SQL alerts (drift, new preview)
+│       ├── config_alerts.yml           # 2 SQL alerts (drift, new preview)
+│       └── attribution_alerts.yml      # 1 SQL alert (attributed security-setting change)
 ├── sql/
 │   └── create_tables.sql               # Reference DDL (tables are created by the job)
 ├── src/
@@ -257,6 +263,7 @@ the collector-created views. Datasets:
 | `current_ds` | `settings_latest` | Overview counters, category & scope charts |
 | `preview_ds` | `settings_latest WHERE is_preview` | Preview section |
 | `drift_ds` | `settings_drift` | Drift bar + detail table |
+| `drift_attributed_ds` | `settings_drift_attributed` | Change Attribution table (who changed it) |
 | `consistency_ds` | `workspace_comparison` | Cross-workspace consistency |
 | `history_ds` | `settings_history` (per-run summary) | Collection history |
 
@@ -315,6 +322,73 @@ mode — still fully functional for the current workspace.
 
 ---
 
+## Attributing changes to an actor (who changed it)
+
+The Settings V2 API records **what** a setting is, never **who** last changed it.
+To answer "who changed this?", the collector correlates each drift row with the
+Unity Catalog audit log (`system.access.audit`) and adds a best-effort actor.
+
+> **This is correlation, not proof.** For each drift row we pick the
+> *nearest-preceding* successful (`response.status_code = 200`) config-related
+> audit event for that workspace inside the snapshot change-window
+> `(previous_collected_at, detected_at]`. Many actors and API calls can touch a
+> workspace within one collection interval, so treat `changed_by` as a strong
+> hint to investigate — not a verdict.
+
+### What gets built
+
+| Object | Purpose |
+|---|---|
+| `settings_drift` (+`workspace_id`, `scope`, `account_id`, `previous_collected_at`) | Drift now carries the keys the audit join needs. |
+| `setting_action_map` (table) | Optional `setting_name → service_name/action_name/request_param_key` bridge. **Tightens** matches when a mapping exists; otherwise a workspace time-window match is used. Seeded with illustrative well-known bridges (IP access lists, tokens, `workspaceConfEdit`). |
+| `settings_drift_attributed` (view) | Every drift row **plus** nullable `changed_by` (`user_identity.email`), `changed_at` (`event_time`), `action_name`, and `attribution_status`. |
+| `security_setting_changed_attributed` (alert) | Emails when an **attributed** change hits a security/governance-relevant setting (governance category or a known security action). |
+
+`attribution_status` is one of:
+
+| Value | Meaning |
+|---|---|
+| `ATTRIBUTED` | A matching audit event was found; `changed_by` is populated. |
+| `NO_AUDIT_MATCH` | Audit is readable, but no event matched the change-window/action. |
+| `AUDIT_NOT_ACCESSIBLE` | The deployment lacks `SELECT` on `system.access` (see grants below). |
+| `ACCOUNT_AUDIT_UNAVAILABLE` | The audit system schema is not enabled / not found. |
+
+### Required access (independent of account-admin)
+
+Reading `system.access.audit` is gated by a **Unity Catalog `SELECT` grant on the
+`system.access` schema**, granted by a **metastore admin**. This is
+**independent of account-admin status** — an account admin without the grant
+still cannot read audit, and a non-account-admin *with* the grant can.
+
+```sql
+-- Run as a metastore admin, granting to the collector/dashboard identity:
+GRANT USE CATALOG ON CATALOG system              TO `<principal>`;
+GRANT USE SCHEMA  ON SCHEMA  system.access       TO `<principal>`;
+GRANT SELECT      ON SCHEMA  system.access        TO `<principal>`;
+```
+
+The collector runs a cheap runtime probe before enrichment. **The job never
+fails if audit is inaccessible** — it degrades gracefully and still builds
+`settings_drift_attributed` with `changed_by = NULL` and the appropriate
+`attribution_status`. The dashboard renders a muted marker
+(`actor unknown — audit log not accessible (needs SELECT on system.access)`) in
+that case.
+
+### Caveats
+
+- **Latency & retention.** Audit ingestion lags **minutes to hours**, so a very
+  recent change may not yet be attributable; the log retains **~365 days**.
+- **Verbose audit logging.** Some data-plane/notebook actions only appear with
+  verbose audit logging enabled — enable it if expected events are missing.
+- **Account vs workspace visibility.** Account-level events carry
+  `workspace_id = 0`; account-scoped drift (`scope = 'account'`,
+  `workspace_id = 0`) is matched against those rows, while workspace-scoped drift
+  matches on its own `workspace_id`.
+- **Version-sensitive bridges.** `service_name` / `action_name` /
+  `request_params` keys in `setting_action_map` **vary by Databricks version**
+  and must be validated against real events in your account before you rely on
+  them. Wrong guesses are harmless — they simply never tighten a match.
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
@@ -325,3 +399,6 @@ mode — still fully functional for the current workspace.
 | Dashboard widgets show `[INSUFFICIENT_PERMISSIONS] Catalog 'main' is not accessible` | You deployed without overriding `catalog`, so it defaulted to `main`. Redeploy with `--var="catalog=<your-catalog>"` (the same one the collector wrote to). |
 | Categories all `NULL` / *Settings by Category* empty | `ai_classify` was unavailable (needs serverless + Foundation Model APIs). Check the job logs for the categorization error; there is no keyword fallback by design. |
 | Alerts always report 0 / never trigger | Drift and new-preview detection compares each setting to its **previous** observation, so at least **two** collection runs must exist before anything can fire. |
+| `changed_by` always NULL / `attribution_status = AUDIT_NOT_ACCESSIBLE` | The collector/dashboard identity lacks `SELECT` on `system.access`. Have a metastore admin run the grants in [Attributing changes to an actor](#attributing-changes-to-an-actor-who-changed-it). This is independent of account-admin. |
+| `attribution_status = ACCOUNT_AUDIT_UNAVAILABLE` | The `system.access` audit schema is not enabled for the metastore, or not found. Enable the audit system schema. |
+| `attribution_status = NO_AUDIT_MATCH` | Audit is readable but no event fell in the change-window — often audit ingestion latency (minutes-to-hours) or an action that needs verbose audit logging. Re-check after the next run. |

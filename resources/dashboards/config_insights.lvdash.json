@@ -16,6 +16,11 @@
       "query": "SELECT change_date, setting_name, workspace_name, category, change_type, previous_value, new_value, detected_at FROM settings_drift ORDER BY detected_at DESC"
     },
     {
+      "name": "drift_attributed_ds",
+      "displayName": "Drift attribution",
+      "query": "SELECT change_date, setting_name, workspace_name, category, change_type, previous_value, new_value, changed_by, changed_at, action_name, attribution_status, COALESCE(changed_by, CASE attribution_status WHEN 'AUDIT_NOT_ACCESSIBLE' THEN 'actor unknown — audit log not accessible (needs SELECT on system.access)' WHEN 'ACCOUNT_AUDIT_UNAVAILABLE' THEN 'actor unknown — account audit not enabled' ELSE 'actor unknown — no matching audit event' END) AS changed_by_display, detected_at FROM settings_drift_attributed ORDER BY detected_at DESC"
+    },
+    {
       "name": "consistency_ds",
       "displayName": "Cross-workspace consistency",
       "query": "SELECT setting_name, category, distinct_values, workspace_count, sample_value, consistency_status FROM workspace_comparison ORDER BY consistency_status, distinct_values DESC"
@@ -382,22 +387,38 @@
         {
           "widget": {
             "name": "drift-workspace-filter",
-            "queries": [{
-              "name": "ws_drift",
-              "query": {
-                "datasetName": "drift_ds",
-                "fields": [
-                  {"name": "workspace_name", "expression": "`workspace_name`"},
-                  {"name": "workspace_name_associativity", "expression": "COUNT_IF(`associative_filter_context_pass_through`)"}
-                ],
-                "disaggregated": false
+            "queries": [
+              {
+                "name": "ws_drift",
+                "query": {
+                  "datasetName": "drift_ds",
+                  "fields": [
+                    {"name": "workspace_name", "expression": "`workspace_name`"},
+                    {"name": "workspace_name_associativity", "expression": "COUNT_IF(`associative_filter_context_pass_through`)"}
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "ws_drift_attr",
+                "query": {
+                  "datasetName": "drift_attributed_ds",
+                  "fields": [
+                    {"name": "workspace_name", "expression": "`workspace_name`"},
+                    {"name": "workspace_name_associativity", "expression": "COUNT_IF(`associative_filter_context_pass_through`)"}
+                  ],
+                  "disaggregated": false
+                }
               }
-            }],
+            ],
             "spec": {
               "version": 2,
               "widgetType": "filter-single-select",
               "encodings": {
-                "fields": [{"fieldName": "workspace_name", "displayName": "Workspace", "queryName": "ws_drift"}]
+                "fields": [
+                  {"fieldName": "workspace_name", "displayName": "Workspace", "queryName": "ws_drift"},
+                  {"fieldName": "workspace_name", "displayName": "Workspace", "queryName": "ws_drift_attr"}
+                ]
               },
               "frame": {"showTitle": true, "title": "Workspace"}
             }
@@ -429,6 +450,17 @@
                   ],
                   "disaggregated": false
                 }
+              },
+              {
+                "name": "cat_drift_attr",
+                "query": {
+                  "datasetName": "drift_attributed_ds",
+                  "fields": [
+                    {"name": "category", "expression": "`category`"},
+                    {"name": "category_associativity", "expression": "COUNT_IF(`associative_filter_context_pass_through`)"}
+                  ],
+                  "disaggregated": false
+                }
               }
             ],
             "spec": {
@@ -437,7 +469,8 @@
               "encodings": {
                 "fields": [
                   {"fieldName": "category", "displayName": "Category", "queryName": "cat_drift"},
-                  {"fieldName": "category", "displayName": "Category", "queryName": "cat_consistency"}
+                  {"fieldName": "category", "displayName": "Category", "queryName": "cat_consistency"},
+                  {"fieldName": "category", "displayName": "Category", "queryName": "cat_drift_attr"}
                 ]
               },
               "frame": {"showTitle": true, "title": "Category"}
@@ -448,7 +481,7 @@
         {
           "widget": {
             "name": "drift-description",
-            "multilineTextboxSpec": {"lines": ["Configuration drift between collection runs: value_changed / added / removed (unreadable sentinel values are ignored). Use the filters, or click a bar to cross-filter the table below. The Settings API does not expose who made a change; check the audit log for attribution."]}
+            "multilineTextboxSpec": {"lines": ["Configuration drift between collection runs: value_changed / added / removed (unreadable sentinel values are ignored). Use the filters, or click a bar to cross-filter the table below. The Settings API does not expose who made a change — the Change Attribution table below correlates each change to the Unity Catalog audit log (system.access.audit) as a best-effort actor (correlation, not proof). If actors show as unknown, the deployment likely lacks SELECT on system.access."]}
           },
           "position": {"x": 0, "y": 2, "width": 12, "height": 1}
         },
@@ -520,6 +553,55 @@
         },
         {
           "widget": {
+            "name": "attribution-title",
+            "multilineTextboxSpec": {"lines": ["### Change Attribution (who changed it)", "Best-effort actor from the Unity Catalog audit log — **correlation, not proof**. A muted marker appears when no actor could be determined (no matching audit event, or audit not accessible)."]}
+          },
+          "position": {"x": 0, "y": 15, "width": 12, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "attribution-table",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "drift_attributed_ds",
+                "fields": [
+                  {"name": "change_date", "expression": "`change_date`"},
+                  {"name": "setting_name", "expression": "`setting_name`"},
+                  {"name": "change_type", "expression": "`change_type`"},
+                  {"name": "workspace_name", "expression": "`workspace_name`"},
+                  {"name": "category", "expression": "`category`"},
+                  {"name": "changed_by_display", "expression": "`changed_by_display`"},
+                  {"name": "changed_at", "expression": "`changed_at`"},
+                  {"name": "action_name", "expression": "`action_name`"},
+                  {"name": "attribution_status", "expression": "`attribution_status`"}
+                ],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {"fieldName": "change_date", "displayName": "Date"},
+                  {"fieldName": "setting_name", "displayName": "Setting"},
+                  {"fieldName": "change_type", "displayName": "Change"},
+                  {"fieldName": "workspace_name", "displayName": "Workspace"},
+                  {"fieldName": "category", "displayName": "Category"},
+                  {"fieldName": "changed_by_display", "displayName": "Changed By"},
+                  {"fieldName": "changed_at", "displayName": "Changed At"},
+                  {"fieldName": "action_name", "displayName": "Audit Action"},
+                  {"fieldName": "attribution_status", "displayName": "Attribution"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Change Attribution"}
+            }
+          },
+          "position": {"x": 0, "y": 16, "width": 12, "height": 7}
+        },
+        {
+          "widget": {
             "name": "consistency-table",
             "queries": [{
               "name": "main_query",
@@ -552,7 +634,7 @@
               "frame": {"showTitle": true, "title": "Cross-Workspace Consistency"}
             }
           },
-          "position": {"x": 0, "y": 15, "width": 12, "height": 6}
+          "position": {"x": 0, "y": 23, "width": 12, "height": 6}
         }
       ]
     }
